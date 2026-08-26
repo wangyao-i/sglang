@@ -1,0 +1,26 @@
+python/sglang/srt/layers/sampler.py
+  h_06a7e946fa5f37 645-648
+.trae/specs/introduce-ascend-device-operator/tasks.md
+  s_3ff2a62e8fbeb1::t_a70defe888bdfc 1-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "1f1048ed1151fbf0f873b4b7911c1bd0316af264",
+  "prompts": {},
+  "humans": {
+    "h_06a7e946fa5f37": {
+      "author": "wangyao-i <iwangyao@outlook.com>"
+    }
+  },
+  "sessions": {
+    "s_3ff2a62e8fbeb1": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a87cf220f53efe098ed36ea",
+        "model": "glm-5.3__max"
+      },
+      "human_author": "wangyao-i <iwangyao@outlook.com>"
+    }
+  }
+}
