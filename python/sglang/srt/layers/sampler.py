@@ -621,6 +621,7 @@ def top_k_top_p_min_p_sampling_from_logits_ascend(
         use_fused_top_k_top_p = bool(torch.all((top_ks <= 1024) & (top_ks >= 1)))
 
     if use_fused_top_k_top_p:
+        top_ps = top_ps.to(dtype=logits.dtype)
         logits_top_k_top_p = torch_npu.npu_top_k_top_p(logits, top_ps, top_ks)
         probs_top_k_top_p = logits_top_k_top_p.softmax(dim=-1)
 
