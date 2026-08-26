@@ -1,0 +1,14 @@
+python/sglang/srt/layers/sampler.py
+  h_06a7e946fa5f37 645-648
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "72a7cac73ac5fc1348d301b3c4477e4439f1b80d",
+  "prompts": {},
+  "humans": {
+    "h_06a7e946fa5f37": {
+      "author": "wangyao-i <iwangyao@outlook.com>"
+    }
+  }
+}
