@@ -25,6 +25,7 @@ server is constructed.
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -40,6 +41,36 @@ register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
 _CAPTURE_TRACE = "SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE"
 _BATCH_CAPTURE = "SGLANG_GRAPH_BATCH_CAPTURE"
+
+
+def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
+    root = Path(__file__).resolve().parents[5]
+    model_runner_source = (
+        root / "python/sglang/srt/model_executor/model_runner.py"
+    ).read_text(encoding="utf-8")
+    decode_runner_source = (
+        root
+        / "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"
+    ).read_text(encoding="utf-8")
+
+    for stage in (
+        "eligibility_begin",
+        "eligibility_return",
+        "execute_begin",
+        "execute_return",
+        "forward_raw_return",
+        "model_forward_return",
+    ):
+        assert model_runner_source.count(f"stage={stage}") == 1
+    for stage in (
+        "runner_enter",
+        "replay_session_enter",
+        "load_batch_return",
+        "backend_replay_begin",
+        "backend_replay_return",
+        "replay_session_return",
+    ):
+        assert decode_runner_source.count(f"stage={stage}") == 1
 
 
 def _make_fake_self(capture_bs):

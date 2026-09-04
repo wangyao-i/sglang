@@ -1545,6 +1545,15 @@ class ModelRunner:
                 reinit_attn_backend,
                 split_forward_count,
             )
+            if (
+                envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
+                and forward_batch.forward_mode.is_decode()
+            ):
+                logger.info(
+                    "Decode graph dispatch: stage=forward_raw_return mode=%s raw_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
             if self.enable_elastic_ep:
                 output = self._maybe_rebalance_after_rank_fault(
                     output,
@@ -1588,6 +1597,15 @@ class ModelRunner:
         if get_exec().moe.elastic_ep_backend is not None:
             self.maybe_join_ep_ranks()
 
+        if (
+            envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
+            and forward_batch.forward_mode.is_decode()
+        ):
+            logger.info(
+                "Decode graph dispatch: stage=model_forward_return mode=%s raw_bs=%d",
+                forward_batch.forward_mode.name,
+                forward_batch.batch_size,
+            )
         return output
 
     def _maybe_execute_deferred_mamba_cow_and_clear(
@@ -1655,11 +1673,29 @@ class ModelRunner:
                 if self.device == "cpu"
                 else forward_batch.forward_mode.is_cuda_graph
             )
+            log_decode_graph = bool(
+                envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
+                and forward_batch.forward_mode.is_decode()
+            )
+            if log_decode_graph:
+                logger.info(
+                    "Decode graph dispatch: stage=eligibility_begin mode=%s raw_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
             can_run_graph = bool(
                 mode_check()
                 and self.decode_cuda_graph_runner
                 and self.decode_cuda_graph_runner.can_run_graph(forward_batch)
             )
+            if log_decode_graph:
+                logger.info(
+                    "Decode graph dispatch: stage=eligibility_return mode=%s "
+                    "raw_bs=%d can_run_graph=%s",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    can_run_graph,
+                )
 
             if (
                 forward_batch.forward_mode.is_decode()
@@ -1671,10 +1707,22 @@ class ModelRunner:
 
             # Replay cuda graph if applicable
             if can_run_graph:
+                if log_decode_graph:
+                    logger.info(
+                        "Decode graph dispatch: stage=execute_begin mode=%s raw_bs=%d",
+                        forward_batch.forward_mode.name,
+                        forward_batch.batch_size,
+                    )
                 ret = self.decode_cuda_graph_runner.execute(
                     forward_batch,
                     pp_proxy_tensors=pp_proxy_tensors,
                 )
+                if log_decode_graph:
+                    logger.info(
+                        "Decode graph dispatch: stage=execute_return mode=%s raw_bs=%d",
+                        forward_batch.forward_mode.name,
+                        forward_batch.batch_size,
+                    )
                 return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
             # DP / MLP-sync padding + attn-tp normalization. Only the decode

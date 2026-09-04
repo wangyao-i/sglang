@@ -1388,6 +1388,14 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        log_graph_key = envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
+        if log_graph_key:
+            logger.info(
+                "Decode graph replay: stage=runner_enter worker=%s mode=%s raw_bs=%d",
+                "draft" if self.model_runner.is_draft_worker else "target",
+                forward_batch.forward_mode.name,
+                forward_batch.batch_size,
+            )
         timer_ctx = device_timer_ctx(
             self.model_runner.device_timer, forward_batch.forward_mode.name.lower()
         )
@@ -1395,10 +1403,19 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             self._replay_attn_backend(), forward_batch.forward_mode
         )
         with timer_ctx, self.backend.replay_session():
-            self.load_batch(forward_batch, pp_proxy_tensors)
-            if envs.SGLANG_LOG_DECODE_GRAPH_KEY.get():
+            if log_graph_key:
                 logger.info(
-                    "Decode graph replay: worker=%s key_size=%s (%s) mode=%s raw_bs=%d%s",
+                    "Decode graph replay: stage=replay_session_enter worker=%s "
+                    "mode=%s raw_bs=%d",
+                    "draft" if self.model_runner.is_draft_worker else "target",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
+            self.load_batch(forward_batch, pp_proxy_tensors)
+            if log_graph_key:
+                logger.info(
+                    "Decode graph replay: stage=load_batch_return worker=%s "
+                    "key_size=%s (%s) mode=%s raw_bs=%d%s",
                     "draft" if self.model_runner.is_draft_worker else "target",
                     self._replay_graph_key.size,
                     "num_tokens" if self.ragged_verify_mode else "bs",
@@ -1413,13 +1430,40 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             if shared_read_ends is SharedReadEnds.PRE_REPLAY:
                 self._publish_read_done(in_graph=False)
 
+            if log_graph_key:
+                logger.info(
+                    "Decode graph replay: stage=backend_replay_begin worker=%s "
+                    "key_size=%s mode=%s raw_bs=%d",
+                    "draft" if self.model_runner.is_draft_worker else "target",
+                    self._replay_graph_key.size,
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
             output = self.backend.replay(self._replay_graph_key, forward_batch)
+            if log_graph_key:
+                logger.info(
+                    "Decode graph replay: stage=backend_replay_return worker=%s "
+                    "key_size=%s mode=%s raw_bs=%d",
+                    "draft" if self.model_runner.is_draft_worker else "target",
+                    self._replay_graph_key.size,
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
 
             if shared_read_ends is SharedReadEnds.IN_REPLAY:
                 self._publish_read_done(in_graph=True)
 
             if shared_read_ends is SharedReadEnds.POST_REPLAY:
                 self._publish_read_done(in_graph=False)
+
+        if log_graph_key:
+            logger.info(
+                "Decode graph replay: stage=replay_session_return worker=%s "
+                "mode=%s raw_bs=%d",
+                "draft" if self.model_runner.is_draft_worker else "target",
+                forward_batch.forward_mode.name,
+                forward_batch.batch_size,
+            )
 
         if isinstance(output, LogitsProcessorOutput):
             if self.is_dllm:
