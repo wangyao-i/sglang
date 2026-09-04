@@ -52,6 +52,13 @@ def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
         root
         / "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"
     ).read_text(encoding="utf-8")
+    npu_runner_source = (
+        root / "python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py"
+    ).read_text(encoding="utf-8")
+    npu_backend_source = (
+        root
+        / "python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py"
+    ).read_text(encoding="utf-8")
 
     for stage in (
         "eligibility_begin",
@@ -71,6 +78,35 @@ def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
         "replay_session_return",
     ):
         assert decode_runner_source.count(f"stage={stage}") == 1
+    for stage in (
+        "npu_execute_begin",
+        "load_batch_begin",
+        "load_batch_return",
+        "input_copy_begin",
+        "input_copy_return",
+        "seq_lens_host_begin",
+        "seq_lens_host_return",
+        "input_update_replay_begin",
+        "input_update_replay_return",
+        "backend_replay_begin",
+        "backend_replay_return",
+    ):
+        assert npu_runner_source.count(f"stage={stage}") == 1
+    for stage in (
+        "backend_enter",
+        "cpu_update_input_ready",
+        "update_thread_start_begin",
+        "update_thread_start_return",
+        "update_thread_enter",
+        "update_device_set",
+        "graph_update_begin",
+        "graph_update_return",
+        "graph_replay_begin",
+        "graph_replay_return",
+        "update_thread_join_begin",
+        "update_thread_join_return",
+    ):
+        assert npu_backend_source.count(f"stage={stage}") == 1
 
 
 def _make_fake_self(capture_bs):

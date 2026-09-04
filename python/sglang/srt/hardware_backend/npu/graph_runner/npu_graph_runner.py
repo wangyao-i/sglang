@@ -211,9 +211,36 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        log_graph_key = envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph: stage=npu_execute_begin mode=%s raw_bs=%d",
+                forward_batch.forward_mode.name,
+                forward_batch.batch_size,
+            )
         if forward_batch.needs_forward_metadata_init():
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=load_batch_begin mode=%s raw_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
             self.load_batch(forward_batch, pp_proxy_tensors)
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=load_batch_return mode=%s raw_bs=%d "
+                    "graph_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                )
         else:
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=input_copy_begin mode=%s raw_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                )
             # In speculative decoding, these two fields are still needed.
             self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
             self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
@@ -232,6 +259,14 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
                 self.buffers.mrope_positions[:, : self.raw_num_token].copy_(
                     forward_batch.mrope_positions
                 )
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=input_copy_return mode=%s raw_bs=%d "
+                    "graph_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                )
 
         graph_key = self._make_graph_key(self.bs)
 
@@ -239,6 +274,14 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
             is_deepseek_dsa(self.model_runner.model_config.hf_config)
             or is_deepseek_v4(self.model_runner.model_config.hf_config)
         ):
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=seq_lens_host_begin mode=%s raw_bs=%d "
+                    "graph_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                )
             if forward_batch.forward_mode.is_target_verify():
                 seq_lens_cpu = forward_batch.seq_lens.cpu() + self.captured_req_width
                 seq_lens = seq_lens_cpu.tolist() + [0] * (self.bs - self.raw_bs)
@@ -246,14 +289,57 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
                 seq_lens = forward_batch.seq_lens.cpu().tolist() + [0] * (
                     self.bs - self.raw_bs
                 )
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=seq_lens_host_return mode=%s raw_bs=%d "
+                    "graph_bs=%d",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                )
+                logger.info(
+                    "NPU decode graph: stage=input_update_replay_begin mode=%s "
+                    "raw_bs=%d graph_bs=%d key_size=%s",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                    graph_key.size,
+                )
             output = self.backend.replay_with_input_update(
                 graph_key,
                 seq_lens=seq_lens,
                 attr_name=self._get_update_attr_name(),
                 attr_type=self._get_update_attr_type(),
             )
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=input_update_replay_return mode=%s "
+                    "raw_bs=%d graph_bs=%d key_size=%s",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                    graph_key.size,
+                )
         else:
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=backend_replay_begin mode=%s raw_bs=%d "
+                    "graph_bs=%d key_size=%s",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                    graph_key.size,
+                )
             output = self.backend.replay(graph_key, forward_batch)
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph: stage=backend_replay_return mode=%s raw_bs=%d "
+                    "graph_bs=%d key_size=%s",
+                    forward_batch.forward_mode.name,
+                    forward_batch.batch_size,
+                    self.bs,
+                    graph_key.size,
+                )
 
         if isinstance(output, LogitsProcessorOutput):
             if self.is_dllm:

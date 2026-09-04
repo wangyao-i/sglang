@@ -12,6 +12,7 @@ non-NPU hosts.
 
 from __future__ import annotations
 
+import logging
 import threading
 from contextlib import AbstractContextManager, contextmanager
 from functools import partial
@@ -24,6 +25,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
 )
+from sglang.srt.environ import envs
 from sglang.srt.model_executor.runner.shape_key import ShapeKey
 from sglang.srt.model_executor.runner_backend.base_cuda_graph_backend import (
     BaseCudaGraphBackend,
@@ -36,6 +38,8 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.runner.base_cuda_graph_runner import (
         BaseCudaGraphRunner,
     )
+
+logger = logging.getLogger(__name__)
 
 
 class NPUCudaGraphBackend(BaseCudaGraphBackend):
@@ -159,21 +163,83 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         2. cpu_update_input: A list of {attr_name: seq_lens} dicts,
            one per speculative step.  Used by EAGLE draft runners.
         """
+        log_graph_key = envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph backend: stage=backend_enter key_size=%s",
+                shape_key.size,
+            )
         if cpu_update_input is None:
             if isinstance(attr_type, torch.Tensor):
                 seq_lens = torch.from_numpy(np.array(seq_lens).astype(np.int32))
             cpu_update_input = [{attr_name: seq_lens}]
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph backend: stage=cpu_update_input_ready key_size=%s",
+                shape_key.size,
+            )
 
         graph = self._graphs[shape_key]
 
         def _update():
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph backend: stage=update_thread_enter key_size=%s",
+                    shape_key.size,
+                )
             self._device_module.set_device(self._device_id)
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph backend: stage=update_device_set key_size=%s",
+                    shape_key.size,
+                )
+                logger.info(
+                    "NPU decode graph backend: stage=graph_update_begin key_size=%s",
+                    shape_key.size,
+                )
             graph.update(cpu_update_input=cpu_update_input)
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph backend: stage=graph_update_return key_size=%s",
+                    shape_key.size,
+                )
 
         thread = threading.Thread(target=_update)
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph backend: stage=update_thread_start_begin "
+                "key_size=%s",
+                shape_key.size,
+            )
         thread.start()
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph backend: stage=update_thread_start_return "
+                "key_size=%s",
+                shape_key.size,
+            )
+            logger.info(
+                "NPU decode graph backend: stage=graph_replay_begin key_size=%s",
+                shape_key.size,
+            )
         graph.replay()
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph backend: stage=graph_replay_return key_size=%s",
+                shape_key.size,
+            )
+            logger.info(
+                "NPU decode graph backend: stage=update_thread_join_begin "
+                "key_size=%s",
+                shape_key.size,
+            )
         thread.join()
+        if log_graph_key:
+            logger.info(
+                "NPU decode graph backend: stage=update_thread_join_return "
+                "key_size=%s",
+                shape_key.size,
+            )
         return self._outputs[shape_key]
 
     def cleanup(self) -> None:
