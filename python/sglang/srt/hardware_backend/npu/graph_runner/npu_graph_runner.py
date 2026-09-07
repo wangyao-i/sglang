@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 _TORCH_COMPILE_DIAGNOSTIC_ENV = "SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC"
 _TORCH_COMPILE_DIAGNOSTIC_MODES = frozenset(
-    {"prepared-eager", "dynamo-eager"}
+    {"prepared-eager", "dynamo-eager", "context-eager"}
 )
 
 if TYPE_CHECKING:
@@ -134,6 +134,13 @@ def patch_model_npu(
                 f"Unsupported {_TORCH_COMPILE_DIAGNOSTIC_ENV}={diagnostic_mode!r}; "
                 f"expected one of {sorted(_TORCH_COMPILE_DIAGNOSTIC_MODES)}"
             )
+        if diagnostic_mode == "context-eager":
+            logger.warning(
+                "NPU torch.compile diagnostic mode context-eager: using raw "
+                "model.forward without compile-safe fused-op dispatch"
+            )
+            yield model.forward
+            return
         with prepare_model_for_torch_compile(model, num_tokens, tp_group):
             if diagnostic_mode == "prepared-eager":
                 logger.warning(
