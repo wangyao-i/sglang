@@ -1139,7 +1139,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         # All setup hooks below read get_attn_backend() (TboForwardBatchPreparer,
         # DeepEP adapter, …) so they must run inside the same ForwardContext
         # that wraps the warmup/capture forward.
-        with forward_context(ForwardContext(attn_backend=attn_backend)):
+        with (
+            forward_context(ForwardContext(attn_backend=attn_backend)),
+            self._torch_compile_forward_context(forward_batch, num_tokens),
+        ):
             self.tbo_plugin.capture_one_batch_size(forward_batch, num_tokens=num_tokens)
 
             if forward_batch.lora_ids is not None:
@@ -1229,6 +1232,12 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                     capture_inputs=None,
                     post_warmup_hook=post_warmup_hook,
                 )
+
+    def _torch_compile_forward_context(
+        self, forward_batch: ForwardBatch, num_tokens: int
+    ):
+        """Platform hook for metadata needed by compile-safe custom ops."""
+        return contextlib.nullcontext()
 
     def _validate_capture_hidden_mode(self, forward_batch: ForwardBatch) -> None:
         if self.capture_hidden_mode < forward_batch.capture_hidden_mode:

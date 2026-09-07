@@ -40,6 +40,9 @@ from sglang.srt.configs.model_config import (
     is_deepseek_dsa,
     is_deepseek_v4,
 )
+from sglang.srt.compilation.torch_compile_decoration import (
+    prepare_model_for_torch_compile,
+)
 from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.environ import envs
 from sglang.srt.model_executor.runner import DecodeCudaGraphRunner
@@ -63,6 +66,9 @@ if TYPE_CHECKING:
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+    set_tc_piecewise_forward_context,
+)
 
 
 @contextmanager
@@ -74,12 +80,13 @@ def patch_model_npu(
 ):
     if enable_compile:
         backend = get_compiler_backend("npugraph_ex")
-        yield torch.compile(
-            torch.no_grad()(model.forward),
-            fullgraph=True,
-            dynamic=False,
-            backend=backend,
-        )
+        with prepare_model_for_torch_compile(model, num_tokens, tp_group):
+            yield torch.compile(
+                torch.no_grad()(model.forward),
+                fullgraph=True,
+                dynamic=False,
+                backend=backend,
+            )
     else:
         yield model.forward
 
@@ -156,6 +163,27 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         ):
             out = run_once_fn()
         return out
+
+    def _torch_compile_forward_context(
+        self, forward_batch: ForwardBatch, num_tokens: int
+    ):
+        if not self.enable_torch_compile:
+            return empty_context()
+
+        runner = self.model_runner
+        return set_tc_piecewise_forward_context(
+            forward_batch,
+            runner.attention_layers,
+            getattr(runner, "quant_config", None),
+            getattr(runner, "moe_layers", []),
+            getattr(runner, "moe_fusions", []),
+            dsa_indexers=getattr(runner, "dsa_indexers", None),
+            mha_companion_layers=getattr(runner, "mha_companion_layers", None),
+            num_tokens=num_tokens,
+            raw_num_tokens=num_tokens,
+            full_graph=True,
+            use_decode_graph_attention=True,
+        )
 
     def _get_update_attr_name(self):
         if self.if_use_v2:

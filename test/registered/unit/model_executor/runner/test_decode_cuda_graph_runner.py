@@ -25,9 +25,12 @@ server is constructed.
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+import torch
 
 from sglang.srt.model_executor.runner import decode_cuda_graph_runner as mod
 from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
@@ -43,14 +46,161 @@ _CAPTURE_TRACE = "SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE"
 _BATCH_CAPTURE = "SGLANG_GRAPH_BATCH_CAPTURE"
 
 
+def test_compile_safe_model_context_restores_fused_ops_and_ca_comm():
+    from sglang.srt.compilation import torch_compile_decoration
+
+    model = object()
+    original_ca_comm = object()
+    tp_group = SimpleNamespace(ca_comm=original_ca_comm)
+    with mock.patch.object(torch_compile_decoration, "_to_torch") as toggle:
+        with torch_compile_decoration.prepare_model_for_torch_compile(
+            model, num_tokens=4, tp_group=tp_group
+        ):
+            tp_group.ca_comm = object()
+            toggle.assert_called_once_with(model, reverse=False, num_tokens=4)
+
+    assert toggle.call_args_list == [
+        mock.call(model, reverse=False, num_tokens=4),
+        mock.call(model, reverse=True, num_tokens=4),
+    ]
+    assert tp_group.ca_comm is original_ca_comm
+
+
+def test_npu_patch_model_uses_compile_safe_model_context():
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    events = []
+
+    @contextmanager
+    def fake_prepare(model, num_tokens, tp_group):
+        events.append(("enter", model, num_tokens, tp_group))
+        try:
+            yield
+        finally:
+            events.append(("exit", model, num_tokens, tp_group))
+
+    model = SimpleNamespace(forward=lambda *args, **kwargs: None)
+    tp_group = SimpleNamespace(ca_comm=object())
+    compiled = object()
+    with (
+        mock.patch.object(
+            npu_graph_runner, "prepare_model_for_torch_compile", fake_prepare
+        ),
+        mock.patch.object(
+            npu_graph_runner, "get_compiler_backend", return_value="npugraph_ex"
+        ),
+        mock.patch.object(
+            npu_graph_runner.torch, "compile", return_value=compiled
+        ) as compile_mock,
+    ):
+        with npu_graph_runner.patch_model_npu(
+            model, True, num_tokens=8, tp_group=tp_group
+        ) as forward:
+            assert forward is compiled
+            assert [event[0] for event in events] == ["enter"]
+
+    assert [event[0] for event in events] == ["enter", "exit"]
+    assert compile_mock.call_args.kwargs == {
+        "fullgraph": True,
+        "dynamic": False,
+        "backend": "npugraph_ex",
+    }
+
+
+def test_npu_compile_context_requests_graph_safe_decode_attention():
+    from sglang.srt.hardware_backend.npu.graph_runner.npu_graph_runner import (
+        NPUGraphRunner,
+    )
+    from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+        get_tc_piecewise_forward_context,
+    )
+
+    forward_batch = object()
+    attention_layers = [object()]
+    fake_self = SimpleNamespace(
+        enable_torch_compile=True,
+        model_runner=SimpleNamespace(
+            attention_layers=attention_layers,
+            quant_config=None,
+            moe_layers=[],
+            moe_fusions=[],
+            dsa_indexers=None,
+            mha_companion_layers=None,
+        ),
+    )
+
+    with NPUGraphRunner._torch_compile_forward_context(
+        fake_self, forward_batch, num_tokens=4
+    ):
+        context = get_tc_piecewise_forward_context()
+        assert context.forward_batch is forward_batch
+        assert context.attention_layers is attention_layers
+        assert context.num_tokens == 4
+        assert context.raw_num_tokens == 4
+        assert context.full_graph is True
+        assert context.use_decode_graph_attention is True
+
+    assert get_tc_piecewise_forward_context() is None
+
+
+def test_compile_safe_attention_calls_decode_graph_implementation():
+    from sglang.srt.layers import radix_attention
+
+    mode = SimpleNamespace(is_decode=lambda: True)
+    forward_batch = SimpleNamespace(
+        forward_mode=mode,
+        num_token_non_padded_cpu=2,
+        out_cache_loc=torch.arange(2),
+        positions=torch.arange(2),
+    )
+    layer = SimpleNamespace()
+    context = SimpleNamespace(
+        forward_batch=forward_batch,
+        attention_layers=[layer],
+        mha_companion_layers=None,
+        use_decode_graph_attention=True,
+        num_tokens=2,
+        raw_num_tokens=2,
+    )
+    output = torch.empty((2, 4))
+    backend = SimpleNamespace()
+
+    def forward_decode_graph(query, key, value, *args, **kwargs):
+        output.fill_(3)
+        return output
+
+    backend.forward_decode_graph = mock.Mock(side_effect=forward_decode_graph)
+    backend.forward = mock.Mock(side_effect=AssertionError("eager attention selected"))
+
+    with (
+        mock.patch.object(
+            radix_attention, "get_tc_piecewise_forward_context", return_value=context
+        ),
+        mock.patch.object(radix_attention, "get_attn_backend", return_value=backend),
+    ):
+        radix_attention._unified_attention_with_output_impl(
+            torch.zeros((2, 4)),
+            torch.zeros((2, 4)),
+            torch.zeros((2, 4)),
+            output,
+            True,
+            0,
+            False,
+            False,
+        )
+
+    backend.forward_decode_graph.assert_called_once()
+    backend.forward.assert_not_called()
+    assert torch.equal(output, torch.full_like(output, 3))
+
+
 def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
     root = Path(__file__).resolve().parents[5]
     model_runner_source = (
         root / "python/sglang/srt/model_executor/model_runner.py"
     ).read_text(encoding="utf-8")
     decode_runner_source = (
-        root
-        / "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"
+        root / "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"
     ).read_text(encoding="utf-8")
     npu_runner_source = (
         root / "python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py"
@@ -127,13 +277,17 @@ class TestInitProfileBatchMode(CustomTestCase):
         env = {_BATCH_CAPTURE: "1"}
         if profiler_dir is not None:
             env["SGLANG_TORCH_PROFILER_DIR"] = profiler_dir
-        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
-            mod, "get_parallel", return_value=SimpleNamespace(tp_rank=rank)
-        ), mock.patch.object(mod, "profile") as mock_profile, mock.patch(
-            "torch.profiler.schedule"
-        ) as mock_schedule, mock.patch(
-            "torch.cuda.memory._record_memory_history"
-        ) as mock_record_history:
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(
+                mod, "get_parallel", return_value=SimpleNamespace(tp_rank=rank)
+            ),
+            mock.patch.object(mod, "profile") as mock_profile,
+            mock.patch("torch.profiler.schedule") as mock_schedule,
+            mock.patch(
+                "torch.cuda.memory._record_memory_history"
+            ) as mock_record_history,
+        ):
             os.environ.pop(_CAPTURE_TRACE, None)  # original flag off
             if profiler_dir is None:
                 os.environ.pop("SGLANG_TORCH_PROFILER_DIR", None)
@@ -177,19 +331,16 @@ class TestInitProfileBatchMode(CustomTestCase):
         # No SGLANG_TORCH_PROFILER_DIR -> falls back to the envs default base dir.
         # Patch makedirs so the test never writes to the cwd.
         fake_self = _make_fake_self([1])
-        with mock.patch.dict(
-            os.environ, {_BATCH_CAPTURE: "1"}, clear=False
-        ), mock.patch.object(
-            mod, "get_parallel", return_value=SimpleNamespace(tp_rank=0)
-        ), mock.patch.object(
-            mod, "profile"
-        ), mock.patch(
-            "torch.profiler.schedule"
-        ), mock.patch(
-            "torch.cuda.memory._record_memory_history"
-        ), mock.patch.object(
-            mod.os, "makedirs"
-        ) as mock_makedirs:
+        with (
+            mock.patch.dict(os.environ, {_BATCH_CAPTURE: "1"}, clear=False),
+            mock.patch.object(
+                mod, "get_parallel", return_value=SimpleNamespace(tp_rank=0)
+            ),
+            mock.patch.object(mod, "profile"),
+            mock.patch("torch.profiler.schedule"),
+            mock.patch("torch.cuda.memory._record_memory_history"),
+            mock.patch.object(mod.os, "makedirs") as mock_makedirs,
+        ):
             os.environ.pop("SGLANG_TORCH_PROFILER_DIR", None)
             os.environ.pop(_CAPTURE_TRACE, None)
             DecodeCudaGraphRunner._init_profile_context_and_memory_record(fake_self)
@@ -210,12 +361,14 @@ class TestInitProfileOriginalMode(CustomTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             environ = dict(env)
             environ["SGLANG_TORCH_PROFILER_DIR"] = tmp
-            with mock.patch.dict(os.environ, environ, clear=False), mock.patch.object(
-                mod, "get_parallel", return_value=SimpleNamespace(tp_rank=0)
-            ), mock.patch.object(mod, "profile") as mock_profile, mock.patch(
-                "torch.profiler.schedule"
-            ) as mock_schedule, mock.patch(
-                "torch.cuda.memory._record_memory_history"
+            with (
+                mock.patch.dict(os.environ, environ, clear=False),
+                mock.patch.object(
+                    mod, "get_parallel", return_value=SimpleNamespace(tp_rank=0)
+                ),
+                mock.patch.object(mod, "profile") as mock_profile,
+                mock.patch("torch.profiler.schedule") as mock_schedule,
+                mock.patch("torch.cuda.memory._record_memory_history"),
             ):
                 for k in (_CAPTURE_TRACE, _BATCH_CAPTURE):
                     if k not in environ:
@@ -243,18 +396,18 @@ class TestInitProfileOriginalMode(CustomTestCase):
 class TestOnTraceReadyNaming(CustomTestCase):
     def _build_on_trace_ready(self, *, capture_bs, rank, tmp):
         fake_self = _make_fake_self(capture_bs)
-        with mock.patch.dict(
-            os.environ,
-            {"SGLANG_TORCH_PROFILER_DIR": tmp, _BATCH_CAPTURE: "1"},
-            clear=False,
-        ), mock.patch.object(
-            mod, "get_parallel", return_value=SimpleNamespace(tp_rank=rank)
-        ), mock.patch.object(
-            mod, "profile"
-        ) as mock_profile, mock.patch(
-            "torch.profiler.schedule"
-        ), mock.patch(
-            "torch.cuda.memory._record_memory_history"
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"SGLANG_TORCH_PROFILER_DIR": tmp, _BATCH_CAPTURE: "1"},
+                clear=False,
+            ),
+            mock.patch.object(
+                mod, "get_parallel", return_value=SimpleNamespace(tp_rank=rank)
+            ),
+            mock.patch.object(mod, "profile") as mock_profile,
+            mock.patch("torch.profiler.schedule"),
+            mock.patch("torch.cuda.memory._record_memory_history"),
         ):
             os.environ.pop(_CAPTURE_TRACE, None)
             DecodeCudaGraphRunner._init_profile_context_and_memory_record(fake_self)

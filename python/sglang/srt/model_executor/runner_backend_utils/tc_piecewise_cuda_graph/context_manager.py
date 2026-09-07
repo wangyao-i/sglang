@@ -81,6 +81,11 @@ class TcPiecewiseForwardContext:
     # bake per-forward fusion flags (e.g. the scattered AR-sconv gate) must
     # not fuse across BCG's eager-break seams, but are safe under full graphs.
     full_graph: bool = False
+    # NPU full-decode torch.compile keeps attention behind the registered
+    # custom-op boundary and executes the graph-safe attention implementation.
+    # This prevents Dynamo from tracing Triton-Ascend driver queries and avoids
+    # selecting the eager ATB paged-attention path during NPUGraph capture.
+    use_decode_graph_attention: bool = False
 
 
 _tc_piecewise_forward_context: Optional[TcPiecewiseForwardContext] = None
@@ -102,6 +107,7 @@ def set_tc_piecewise_forward_context(
     num_tokens: Optional[int] = None,
     raw_num_tokens: Optional[int] = None,
     full_graph: bool = False,
+    use_decode_graph_attention: bool = False,
 ):
     global _tc_piecewise_forward_context
     _tc_piecewise_forward_context = TcPiecewiseForwardContext(
@@ -115,6 +121,7 @@ def set_tc_piecewise_forward_context(
         num_tokens=num_tokens,
         raw_num_tokens=raw_num_tokens,
         full_graph=full_graph,
+        use_decode_graph_attention=use_decode_graph_attention,
     )
     try:
         yield

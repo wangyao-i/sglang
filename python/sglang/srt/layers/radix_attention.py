@@ -168,8 +168,14 @@ class RadixAttention(nn.Module):
 
         context = get_tc_piecewise_forward_context()
         if (
-            forward_batch.forward_mode.is_extend()
-            and context is not None
+            context is not None
+            and (
+                forward_batch.forward_mode.is_extend()
+                or (
+                    forward_batch.forward_mode.is_decode()
+                    and context.use_decode_graph_attention
+                )
+            )
             # ``_force_eager_attn`` is only set inside Inkling's eager
             # norm+attn+sconv region, never during tc-piecewise capture. Reading
             # the ContextVar under the fullgraph torch.compile trace is
@@ -363,15 +369,27 @@ def _unified_attention_with_output_impl(
     # the FA kernel validates out.size(0) == q.size(0).
     forward_batch._attn_output = output[:real_query_num_tokens]
 
-    ret = get_attn_backend().forward(
-        query,
-        key,
-        value,
-        attention_layer,
-        forward_batch,
-        save_kv_cache,
-        **kwargs,
-    )
+    attn_backend = get_attn_backend()
+    if context.use_decode_graph_attention and forward_batch.forward_mode.is_decode():
+        ret = attn_backend.forward_decode_graph(
+            query,
+            key,
+            value,
+            attention_layer,
+            forward_batch,
+            save_kv_cache,
+            **kwargs,
+        )
+    else:
+        ret = attn_backend.forward(
+            query,
+            key,
+            value,
+            attention_layer,
+            forward_batch,
+            save_kv_cache,
+            **kwargs,
+        )
     forward_batch.out_cache_loc = original_out_cache_loc
     forward_batch.positions = original_positions
 
