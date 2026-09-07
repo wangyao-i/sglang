@@ -25,7 +25,7 @@ server is constructed.
 import os
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -106,6 +106,71 @@ def test_npu_patch_model_uses_compile_safe_model_context():
         "dynamic": False,
         "backend": "npugraph_ex",
     }
+
+
+def test_npu_patch_model_prepared_eager_diagnostic_skips_torch_compile(monkeypatch):
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    model = SimpleNamespace(forward=lambda *args, **kwargs: None)
+    tp_group = SimpleNamespace(ca_comm=object())
+    monkeypatch.setenv(
+        "SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC", "prepared-eager"
+    )
+
+    with mock.patch.object(
+        npu_graph_runner,
+        "prepare_model_for_torch_compile",
+        lambda *args: nullcontext(),
+    ), mock.patch.object(npu_graph_runner.torch, "compile") as compile_mock:
+        with npu_graph_runner.patch_model_npu(
+            model, True, num_tokens=8, tp_group=tp_group
+        ) as forward:
+            assert forward is model.forward
+
+    compile_mock.assert_not_called()
+
+
+def test_npu_patch_model_dynamo_eager_diagnostic_uses_eager_backend(monkeypatch):
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    model = SimpleNamespace(forward=lambda *args, **kwargs: None)
+    tp_group = SimpleNamespace(ca_comm=object())
+    compiled = object()
+    monkeypatch.setenv("SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC", "dynamo-eager")
+
+    with mock.patch.object(
+        npu_graph_runner,
+        "prepare_model_for_torch_compile",
+        lambda *args: nullcontext(),
+    ), mock.patch.object(
+        npu_graph_runner.torch, "compile", return_value=compiled
+    ) as compile_mock:
+        with npu_graph_runner.patch_model_npu(
+            model, True, num_tokens=8, tp_group=tp_group
+        ) as forward:
+            assert forward is compiled
+
+    assert compile_mock.call_args.kwargs == {
+        "fullgraph": True,
+        "dynamic": False,
+        "backend": "eager",
+    }
+
+
+def test_npu_patch_model_rejects_unknown_compile_diagnostic(monkeypatch):
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    monkeypatch.setenv("SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC", "invalid")
+    with pytest.raises(
+        ValueError, match="Unsupported SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC"
+    ):
+        with npu_graph_runner.patch_model_npu(
+            SimpleNamespace(forward=lambda *args, **kwargs: None),
+            True,
+            num_tokens=8,
+            tp_group=SimpleNamespace(ca_comm=object()),
+        ):
+            pass
 
 
 def test_npu_compile_layer_metadata_is_initialized_without_prefill_graph():

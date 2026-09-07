@@ -61,6 +61,11 @@ if is_npu:
 
 logger = logging.getLogger(__name__)
 
+_TORCH_COMPILE_DIAGNOSTIC_ENV = "SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC"
+_TORCH_COMPILE_DIAGNOSTIC_MODES = frozenset(
+    {"prepared-eager", "dynamo-eager"}
+)
+
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -123,8 +128,32 @@ def patch_model_npu(
     tp_group: GroupCoordinator,
 ):
     if enable_compile:
-        backend = get_compiler_backend("npugraph_ex")
+        diagnostic_mode = os.environ.get(_TORCH_COMPILE_DIAGNOSTIC_ENV)
+        if diagnostic_mode and diagnostic_mode not in _TORCH_COMPILE_DIAGNOSTIC_MODES:
+            raise ValueError(
+                f"Unsupported {_TORCH_COMPILE_DIAGNOSTIC_ENV}={diagnostic_mode!r}; "
+                f"expected one of {sorted(_TORCH_COMPILE_DIAGNOSTIC_MODES)}"
+            )
         with prepare_model_for_torch_compile(model, num_tokens, tp_group):
+            if diagnostic_mode == "prepared-eager":
+                logger.warning(
+                    "NPU torch.compile diagnostic mode prepared-eager: using "
+                    "compile-safe fused-op dispatch without torch.compile"
+                )
+                yield model.forward
+                return
+
+            backend = (
+                "eager"
+                if diagnostic_mode == "dynamo-eager"
+                else get_compiler_backend("npugraph_ex")
+            )
+            if diagnostic_mode:
+                logger.warning(
+                    "NPU torch.compile diagnostic mode %s: backend=%s",
+                    diagnostic_mode,
+                    backend,
+                )
             yield torch.compile(
                 torch.no_grad()(model.forward),
                 fullgraph=True,
