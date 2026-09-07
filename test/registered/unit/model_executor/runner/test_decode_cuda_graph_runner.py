@@ -30,6 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 import torch
 
 from sglang.srt.model_executor.runner import decode_cuda_graph_runner as mod
@@ -105,6 +106,64 @@ def test_npu_patch_model_uses_compile_safe_model_context():
         "dynamic": False,
         "backend": "npugraph_ex",
     }
+
+
+def test_npu_compile_layer_metadata_is_initialized_without_prefill_graph():
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    attention_layers = [object(), object()]
+    decoder_layers = [
+        SimpleNamespace(self_attn=SimpleNamespace(attn=attention_layer))
+        for attention_layer in attention_layers
+    ]
+    model_runner = SimpleNamespace(
+        model=SimpleNamespace(
+            language_model=SimpleNamespace(
+                model=SimpleNamespace(layers=decoder_layers)
+            )
+        ),
+        model_config=SimpleNamespace(num_hidden_layers=2),
+    )
+
+    npu_graph_runner._ensure_npu_torch_compile_layers(model_runner)
+
+    assert model_runner.attention_layers == attention_layers
+    assert model_runner.moe_layers == [None, None]
+    assert model_runner.moe_fusions == [None, None]
+    assert model_runner.dsa_indexers == [None, None]
+    assert model_runner.mha_companion_layers == [None, None]
+
+
+def test_npu_compile_layer_metadata_preserves_existing_setup():
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    attention_layers = [object()]
+    model_runner = SimpleNamespace(attention_layers=attention_layers)
+
+    npu_graph_runner._ensure_npu_torch_compile_layers(model_runner)
+
+    assert model_runner.attention_layers is attention_layers
+
+
+def test_npu_compile_layer_metadata_rejects_incomplete_attention_map():
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    model_runner = SimpleNamespace(
+        model=SimpleNamespace(
+            language_model=SimpleNamespace(
+                model=SimpleNamespace(
+                    layers=[SimpleNamespace(mlp=SimpleNamespace())]
+                )
+            )
+        ),
+        model_config=SimpleNamespace(num_hidden_layers=1),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="expected 1, found 0",
+    ):
+        npu_graph_runner._ensure_npu_torch_compile_layers(model_runner)
 
 
 def test_npu_compile_context_requests_graph_safe_decode_attention():

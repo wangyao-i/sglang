@@ -66,9 +66,53 @@ if TYPE_CHECKING:
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.model_runner_components.layer_setup import (
+    compute_attention_and_moe_layers,
+)
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     set_tc_piecewise_forward_context,
 )
+from sglang.srt.model_loader.utils import resolve_language_model
+from sglang.srt.runtime_context import get_flags
+
+
+def _ensure_npu_torch_compile_layers(model_runner: ModelRunner) -> None:
+    """Populate metadata required by the compile-safe attention custom op.
+
+    Prefill graph setup normally publishes these lists. A decode-only graph
+    profile skips that setup entirely, so NPU torch.compile must initialize the
+    same metadata before ``DecodeCudaGraphRunner.__init__`` starts capture.
+    Silently omitting the context would route capture back through eager ATB
+    paged attention and recreate the failure this boundary is meant to avoid.
+    """
+    attention_layers = getattr(model_runner, "attention_layers", None)
+    if attention_layers:
+        return
+
+    language_model = resolve_language_model(model_runner.model)
+    layer_model = language_model
+    while not hasattr(layer_model, "layers") and hasattr(layer_model, "model"):
+        layer_model = layer_model.model
+    if not hasattr(layer_model, "layers"):
+        raise RuntimeError(
+            "NPU torch compile requires a language model with decoder layers"
+        )
+
+    (
+        model_runner.attention_layers,
+        model_runner.moe_layers,
+        model_runner.moe_fusions,
+        model_runner.dsa_indexers,
+        model_runner.mha_companion_layers,
+    ) = compute_attention_and_moe_layers(layer_model)
+
+    expected_layers = model_runner.model_config.num_hidden_layers
+    if len(model_runner.attention_layers) < expected_layers:
+        raise RuntimeError(
+            "NPU torch compile requires attention metadata for every decoder "
+            f"layer: expected {expected_layers}, found "
+            f"{len(model_runner.attention_layers)}"
+        )
 
 
 @contextmanager
@@ -107,6 +151,8 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         from sglang.srt.compilation import torch_compile_decoration
 
         torch_compile_decoration.patch_model = patch_model_npu
+        if get_flags().capture.enable_torch_compile:
+            _ensure_npu_torch_compile_layers(model_runner)
         super().__init__(
             model_runner,
             attn_backend=attn_backend,
