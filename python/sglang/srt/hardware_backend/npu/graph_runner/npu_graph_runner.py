@@ -63,7 +63,13 @@ logger = logging.getLogger(__name__)
 
 _TORCH_COMPILE_DIAGNOSTIC_ENV = "SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC"
 _TORCH_COMPILE_DIAGNOSTIC_MODES = frozenset(
-    {"prepared-eager", "dynamo-eager", "context-eager"}
+    {
+        "prepared-eager",
+        "dynamo-eager",
+        "context-eager",
+        "audio-prepared-eager",
+        "language-prepared-eager",
+    }
 )
 
 if TYPE_CHECKING:
@@ -120,6 +126,14 @@ def _ensure_npu_torch_compile_layers(model_runner: ModelRunner) -> None:
         )
 
 
+def _diagnostic_fused_op_filter(diagnostic_mode: Optional[str]):
+    if diagnostic_mode == "audio-prepared-eager":
+        return lambda path, _op: path[:1] == ("audio_tower",)
+    if diagnostic_mode == "language-prepared-eager":
+        return lambda path, _op: path[:1] == ("language_model",)
+    return None
+
+
 @contextmanager
 def patch_model_npu(
     model: torch.nn.Module,
@@ -141,11 +155,31 @@ def patch_model_npu(
             )
             yield model.forward
             return
-        with prepare_model_for_torch_compile(model, num_tokens, tp_group):
+        module_filter = _diagnostic_fused_op_filter(diagnostic_mode)
+        prepare_context = (
+            prepare_model_for_torch_compile(
+                model, num_tokens, tp_group, module_filter=module_filter
+            )
+            if module_filter is not None
+            else prepare_model_for_torch_compile(model, num_tokens, tp_group)
+        )
+        with prepare_context:
             if diagnostic_mode == "prepared-eager":
                 logger.warning(
                     "NPU torch.compile diagnostic mode prepared-eager: using "
                     "compile-safe fused-op dispatch without torch.compile"
+                )
+                yield model.forward
+                return
+
+            if diagnostic_mode in {
+                "audio-prepared-eager",
+                "language-prepared-eager",
+            }:
+                logger.warning(
+                    "NPU torch.compile diagnostic mode %s: using raw model.forward "
+                    "with a scoped compile-safe fused-op context",
+                    diagnostic_mode,
                 )
                 yield model.forward
                 return

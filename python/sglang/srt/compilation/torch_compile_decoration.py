@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from typing import Callable, Optional
 
 import torch
 
@@ -28,15 +29,27 @@ from sglang.srt.utils.patch_torch import monkey_patch_torch_compile
 _is_hip = is_hip()
 
 
-def _to_torch(model: torch.nn.Module, reverse: bool, num_tokens: int) -> None:
-    for sub in model._modules.values():
-        if isinstance(sub, BaseFusedOp):
+FusedOpFilter = Callable[[tuple[str, ...], BaseFusedOp], bool]
+
+
+def _to_torch(
+    model: torch.nn.Module,
+    reverse: bool,
+    num_tokens: int,
+    module_filter: Optional[FusedOpFilter] = None,
+    _path: tuple[str, ...] = (),
+) -> None:
+    for name, sub in model._modules.items():
+        path = (*_path, name)
+        if isinstance(sub, BaseFusedOp) and (
+            module_filter is None or module_filter(path, sub)
+        ):
             if reverse:
                 sub.leave_torch_compile()
             else:
                 sub.enter_torch_compile(num_tokens=num_tokens)
         if isinstance(sub, torch.nn.Module):
-            _to_torch(sub, reverse, num_tokens)
+            _to_torch(sub, reverse, num_tokens, module_filter, path)
 
 
 @contextmanager
@@ -44,6 +57,7 @@ def prepare_model_for_torch_compile(
     model: torch.nn.Module,
     num_tokens: int,
     tp_group: GroupCoordinator,
+    module_filter: Optional[FusedOpFilter] = None,
 ):
     """Put fused ops into their compile-safe form for one compile scope.
 
@@ -51,12 +65,18 @@ def prepare_model_for_torch_compile(
     well as the default CUDA path. Otherwise Dynamo can trace through Python
     launchers for device kernels instead of seeing their custom-op boundary.
     """
-    _to_torch(model, reverse=False, num_tokens=num_tokens)
+    if module_filter is None:
+        _to_torch(model, reverse=False, num_tokens=num_tokens)
+    else:
+        _to_torch(model, reverse=False, num_tokens=num_tokens, module_filter=module_filter)
     backup_ca_comm = tp_group.ca_comm
     try:
         yield
     finally:
-        _to_torch(model, reverse=True, num_tokens=num_tokens)
+        if module_filter is None:
+            _to_torch(model, reverse=True, num_tokens=num_tokens)
+        else:
+            _to_torch(model, reverse=True, num_tokens=num_tokens, module_filter=module_filter)
         tp_group.ca_comm = backup_ca_comm
 
 

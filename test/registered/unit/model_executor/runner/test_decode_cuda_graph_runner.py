@@ -151,6 +151,38 @@ def test_npu_patch_model_context_eager_diagnostic_skips_compile_safe_dispatch(
     compile_mock.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("diagnostic_mode", "expected_root"),
+    [
+        ("audio-prepared-eager", "audio_tower"),
+        ("language-prepared-eager", "language_model"),
+    ],
+)
+def test_npu_patch_model_scoped_prepared_eager_diagnostic(
+    monkeypatch, diagnostic_mode, expected_root
+):
+    from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
+
+    model = SimpleNamespace(forward=lambda *args, **kwargs: None)
+    tp_group = SimpleNamespace(ca_comm=object())
+    monkeypatch.setenv("SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC", diagnostic_mode)
+
+    with mock.patch.object(
+        npu_graph_runner,
+        "prepare_model_for_torch_compile",
+        return_value=nullcontext(),
+    ) as prepare, mock.patch.object(npu_graph_runner.torch, "compile") as compile_mock:
+        with npu_graph_runner.patch_model_npu(
+            model, True, num_tokens=8, tp_group=tp_group
+        ) as forward:
+            assert forward is model.forward
+
+    module_filter = prepare.call_args.kwargs["module_filter"]
+    assert module_filter((expected_root, "block"), object())
+    assert not module_filter(("other", "block"), object())
+    compile_mock.assert_not_called()
+
+
 def test_npu_patch_model_dynamo_eager_diagnostic_uses_eager_backend(monkeypatch):
     from sglang.srt.hardware_backend.npu.graph_runner import npu_graph_runner
 
