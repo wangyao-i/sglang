@@ -3,7 +3,7 @@
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -299,6 +299,71 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         self.assertIs(backend.calls[-1].attention_layer, attention_layer)
         self.assertTrue(torch.all(output[:2] == 3))
         self.assertIs(forward_batch.out_cache_loc, original_out_cache_loc)
+
+    def test_npu_decode_graph_custom_op_preserves_static_batch_state(self):
+        attention_layer = SimpleNamespace()
+        original_output = object()
+        forward_batch = SimpleNamespace(
+            forward_mode=SimpleNamespace(is_decode=lambda: True),
+            num_token_non_padded_cpu=2,
+            out_cache_loc=torch.arange(4, dtype=torch.int64),
+            positions=torch.arange(4, dtype=torch.int64),
+            _attn_output=original_output,
+        )
+        context = SimpleNamespace(
+            forward_batch=forward_batch,
+            attention_layers=[attention_layer],
+            mha_companion_layers=None,
+            use_decode_graph_attention=True,
+            num_tokens=4,
+            raw_num_tokens=4,
+        )
+        original_out_cache_loc = forward_batch.out_cache_loc
+        original_positions = forward_batch.positions
+        backend = SimpleNamespace()
+
+        def forward_decode_graph(query, key, value, *args, **kwargs):
+            self.assertEqual(query.shape, (4, 2, 3))
+            self.assertEqual(key.shape, (4, 2, 3))
+            self.assertEqual(value.shape, (4, 2, 3))
+            self.assertIs(args[1], forward_batch)
+            return torch.full_like(query, 9)
+
+        backend.forward_decode_graph = Mock(side_effect=forward_decode_graph)
+        backend.forward = Mock(
+            side_effect=AssertionError("ordinary backend path selected")
+        )
+        query = torch.zeros((4, 2, 3))
+        output = torch.empty_like(query)
+
+        with (
+            patch.object(
+                radix_attention_module,
+                "get_tc_piecewise_forward_context",
+                return_value=context,
+            ),
+            patch.object(
+                radix_attention_module, "get_attn_backend", return_value=backend
+            ),
+        ):
+            lse = radix_attention_module._unified_attention_with_output_impl(
+                query,
+                query,
+                query,
+                output,
+                True,
+                0,
+                False,
+                False,
+            )
+
+        self.assertIsNone(lse)
+        backend.forward_decode_graph.assert_called_once()
+        backend.forward.assert_not_called()
+        self.assertTrue(torch.all(output == 9))
+        self.assertIs(forward_batch.out_cache_loc, original_out_cache_loc)
+        self.assertIs(forward_batch.positions, original_positions)
+        self.assertIs(forward_batch._attn_output, original_output)
 
     def test_lse_fake_impl_declares_shape_and_dtype(self):
         query = torch.empty((5, 3, 7), dtype=torch.float16)

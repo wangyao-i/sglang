@@ -318,6 +318,58 @@ def _unified_attention_with_output_impl(
     forward_batch = context.forward_batch
     attention_layers = context.attention_layers
     attention_layer = attention_layers[layer_id]
+
+    # NPU Torch-Compile decode graphs need this custom-op boundary so Dynamo
+    # does not trace the backend's driver queries. Unlike ordinary PCG, their
+    # backend already consumes the graph's static Q/K/V and ForwardBatch
+    # buffers. Narrowing those buffers here changes the graph-visible state and
+    # diverges from the known-correct direct NPU decode-graph path.
+    use_direct_npu_decode_graph = (
+        getattr(context, "use_decode_graph_attention", False)
+        and forward_batch.forward_mode.is_decode()
+        # Prefix-MHA has a distinct K/V extent and LSE contract. Preserve its
+        # established generic PCG handling until it has its own NPU parity run.
+        and key_value_num_tokens is None
+        and not return_lse
+    )
+
+    # DeepSeek MLA has two RadixAttention instances per layer (attn_mqa and
+    # attn_mha) that share the same layer_id. Preserve the calling instance's
+    # identity through the custom-op boundary; save_kv_cache is not an identity
+    # signal because absorbed MLA can also disable a redundant cache store.
+    if use_mha_companion:
+        assert context.mha_companion_layers is not None
+        attention_layer = context.mha_companion_layers[layer_id]
+        assert attention_layer is not None
+
+    if use_direct_npu_decode_graph:
+        graph_kwargs = {}
+        if q_rope is not None:
+            graph_kwargs["q_rope"] = q_rope
+        if k_rope is not None:
+            graph_kwargs["k_rope"] = k_rope
+        if sinks is not None:
+            graph_kwargs["sinks"] = sinks
+
+        ret = get_attn_backend().forward_decode_graph(
+            query,
+            key,
+            value,
+            attention_layer,
+            forward_batch,
+            save_kv_cache,
+            **graph_kwargs,
+        )
+        lse = None
+        if return_lse:
+            assert isinstance(ret, tuple)
+            ret, lse, *_ = ret
+        else:
+            assert isinstance(ret, torch.Tensor)
+        if ret.data_ptr() != output.data_ptr():
+            output.view(ret.shape).copy_(ret)
+        return lse
+
     real_query_num_tokens = forward_batch.num_token_non_padded_cpu
     # Ordinary PCG attention pads Q/K/V to the same token bucket. Prefix MHA
     # instead supplies a fixed-capacity K/V chunk whose extent is independent
@@ -330,15 +382,6 @@ def _unified_attention_with_output_impl(
         key = key[:key_value_num_tokens]
     if value is not None:
         value = value[:key_value_num_tokens]
-
-    # DeepSeek MLA has two RadixAttention instances per layer (attn_mqa and
-    # attn_mha) that share the same layer_id. Preserve the calling instance's
-    # identity through the custom-op boundary; save_kv_cache is not an identity
-    # signal because absorbed MLA can also disable a redundant cache store.
-    if use_mha_companion:
-        assert context.mha_companion_layers is not None
-        attention_layer = context.mha_companion_layers[layer_id]
-        assert attention_layer is not None
 
     kwargs = {}
     if q_rope is not None:
@@ -370,26 +413,15 @@ def _unified_attention_with_output_impl(
     forward_batch._attn_output = output[:real_query_num_tokens]
 
     attn_backend = get_attn_backend()
-    if context.use_decode_graph_attention and forward_batch.forward_mode.is_decode():
-        ret = attn_backend.forward_decode_graph(
-            query,
-            key,
-            value,
-            attention_layer,
-            forward_batch,
-            save_kv_cache,
-            **kwargs,
-        )
-    else:
-        ret = attn_backend.forward(
-            query,
-            key,
-            value,
-            attention_layer,
-            forward_batch,
-            save_kv_cache,
-            **kwargs,
-        )
+    ret = attn_backend.forward(
+        query,
+        key,
+        value,
+        attention_layer,
+        forward_batch,
+        save_kv_cache,
+        **kwargs,
+    )
     forward_batch.out_cache_loc = original_out_cache_loc
     forward_batch.positions = original_positions
 
