@@ -77,14 +77,20 @@ class TestPrefillCudaGraphRunnerChunkedPrefix(CustomTestCase):
             capture_time=2.5,
         )
 
-        released = graph_setup._release_npu_prefill_capture_for_diagnostics(
-            capture, eager_runner, device_module
-        )
+        with (
+            patch.object(graph_setup, "set_global_graph_memory_pool") as clear_pool,
+            patch.object(graph_setup, "set_graph_pool_id") as clear_pool_id,
+        ):
+            released = graph_setup._release_npu_prefill_capture_for_diagnostics(
+                capture, eager_runner, device_module
+            )
 
         self.assertIs(released.runner, eager_runner)
         self.assertEqual(released.memory_usage_gb, 0)
         self.assertEqual(released.capture_time, 2.5)
         self.assertEqual(calls, ["synchronize", "cleanup"])
+        clear_pool.assert_called_once_with(None)
+        clear_pool_id.assert_called_once_with(None)
 
     def test_low_free_memory_still_captures_prefill_graph(self):
         eager_runner = object()

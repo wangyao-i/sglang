@@ -41,6 +41,7 @@ from sglang.srt.model_executor.runner import (
     PrefillCudaGraphRunner,
     get_batch_sizes_to_capture,
 )
+from sglang.srt.model_executor.runner_utils.pool import set_global_graph_memory_pool
 from sglang.srt.model_loader.utils import resolve_language_model
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_flags
@@ -113,6 +114,8 @@ def _release_npu_prefill_capture_for_diagnostics(
 
     device_module.synchronize()
     backend.cleanup()
+    set_global_graph_memory_pool(None)
+    set_graph_pool_id(None)
     return GraphCapture(
         runner=eager_runner,
         memory_phase="prefill",
