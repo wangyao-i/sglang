@@ -267,6 +267,24 @@ class RadixAttention(nn.Module):
                     if return_lse
                     else unified_attention_with_output
                 )
+            state_kwargs = {}
+            if (
+                context.use_decode_graph_attention
+                and forward_batch.forward_mode.is_decode()
+            ):
+                # The NPU implementation reads and mutates the paged KV cache
+                # through the attention backend. Make those aliasing effects
+                # explicit to Dynamo instead of leaving them hidden behind the
+                # Python forward context. Without these operands, a preceding
+                # encoder/prefill graph can hand valid logits to a compiled
+                # decode whose KV dependency is absent from the custom-op
+                # schema.
+                token_to_kv_pool = get_attn_backend().token_to_kv_pool
+                state_kwargs = {
+                    "key_cache": token_to_kv_pool.get_key_buffer(self.layer_id),
+                    "value_cache": token_to_kv_pool.get_value_buffer(self.layer_id),
+                    "out_cache_loc": forward_batch.out_cache_loc,
+                }
             lse = op(
                 q,
                 k,
@@ -276,6 +294,7 @@ class RadixAttention(nn.Module):
                 self.layer_id,
                 use_mha_companion=use_mha_companion,
                 key_value_num_tokens=key_value_num_tokens,
+                **state_kwargs,
                 **kwargs,
             )
             if return_lse:
@@ -307,6 +326,9 @@ def _unified_attention_with_output_impl(
     q_rope: Optional[torch.Tensor] = None,
     k_rope: Optional[torch.Tensor] = None,
     sinks: Optional[torch.Tensor] = None,
+    key_cache: Optional[torch.Tensor] = None,
+    value_cache: Optional[torch.Tensor] = None,
+    out_cache_loc: Optional[torch.Tensor] = None,
     # MLA / TRT-LLM / NSA paths pass these through RadixAttention.forward(**kwargs);
     # they must appear in the schema when --enforce-piecewise-cuda-graph is on.
     cos_sin_cache: Optional[torch.Tensor] = None,
@@ -314,6 +336,11 @@ def _unified_attention_with_output_impl(
     llama_4_scaling: Optional[torch.Tensor] = None,
     topk_indices: Optional[torch.Tensor] = None,
 ) -> Optional[torch.Tensor]:
+    # These operands describe storage that the backend accesses through its
+    # token_to_kv_pool and ForwardBatch. Keep them in the custom-op schema even
+    # though the implementation uses the owning objects, so compiler and graph
+    # dependency analysis can see the cache read/write and location input.
+    del key_cache, value_cache, out_cache_loc
     context = get_tc_piecewise_forward_context()
     forward_batch = context.forward_batch
     attention_layers = context.attention_layers
@@ -450,7 +477,7 @@ def _unified_attention_with_output_impl(
     return lse
 
 
-@register_custom_op(mutates_args=["output"])
+@register_custom_op(mutates_args=["output", "key_cache", "value_cache"])
 @register_split_op()
 def unified_attention_with_output(
     query: torch.Tensor,
@@ -465,6 +492,9 @@ def unified_attention_with_output(
     q_rope: Optional[torch.Tensor] = None,
     k_rope: Optional[torch.Tensor] = None,
     sinks: Optional[torch.Tensor] = None,
+    key_cache: Optional[torch.Tensor] = None,
+    value_cache: Optional[torch.Tensor] = None,
+    out_cache_loc: Optional[torch.Tensor] = None,
     cos_sin_cache: Optional[torch.Tensor] = None,
     is_neox: Optional[bool] = None,
     llama_4_scaling: Optional[torch.Tensor] = None,
@@ -483,6 +513,9 @@ def unified_attention_with_output(
         q_rope=q_rope,
         k_rope=k_rope,
         sinks=sinks,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        out_cache_loc=out_cache_loc,
         cos_sin_cache=cos_sin_cache,
         is_neox=is_neox,
         llama_4_scaling=llama_4_scaling,
@@ -497,7 +530,8 @@ def _unified_attention_with_output_and_lse_fake(
 
 
 @register_custom_op(
-    mutates_args=["output"], fake_impl=_unified_attention_with_output_and_lse_fake
+    mutates_args=["output", "key_cache", "value_cache"],
+    fake_impl=_unified_attention_with_output_and_lse_fake,
 )
 @register_split_op()
 def unified_attention_with_output_and_lse(
@@ -513,6 +547,9 @@ def unified_attention_with_output_and_lse(
     q_rope: Optional[torch.Tensor] = None,
     k_rope: Optional[torch.Tensor] = None,
     sinks: Optional[torch.Tensor] = None,
+    key_cache: Optional[torch.Tensor] = None,
+    value_cache: Optional[torch.Tensor] = None,
+    out_cache_loc: Optional[torch.Tensor] = None,
     cos_sin_cache: Optional[torch.Tensor] = None,
     is_neox: Optional[bool] = None,
     llama_4_scaling: Optional[torch.Tensor] = None,
@@ -531,6 +568,9 @@ def unified_attention_with_output_and_lse(
         q_rope=q_rope,
         k_rope=k_rope,
         sinks=sinks,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        out_cache_loc=out_cache_loc,
         cos_sin_cache=cos_sin_cache,
         is_neox=is_neox,
         llama_4_scaling=llama_4_scaling,

@@ -365,6 +365,56 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         self.assertIs(forward_batch.positions, original_positions)
         self.assertIs(forward_batch._attn_output, original_output)
 
+    def test_decode_dispatch_exposes_kv_state_to_custom_op(self):
+        layer = self._new_layer()
+        key_cache = torch.zeros((8, 2, 3))
+        value_cache = torch.ones((8, 2, 3))
+        out_cache_loc = torch.arange(2, dtype=torch.int64)
+        forward_batch = SimpleNamespace(
+            forward_mode=ForwardMode.DECODE,
+            mha_return_lse=False,
+            out_cache_loc=out_cache_loc,
+        )
+        context = SimpleNamespace(
+            mha_companion_layers=None,
+            use_decode_graph_attention=True,
+        )
+        pool = SimpleNamespace(
+            get_key_buffer=Mock(return_value=key_cache),
+            get_value_buffer=Mock(return_value=value_cache),
+        )
+        backend = SimpleNamespace(token_to_kv_pool=pool)
+        calls = []
+
+        def output_only(*args, **kwargs):
+            calls.append(kwargs)
+            args[3].fill_(5)
+
+        query = torch.zeros((2, 2, 3))
+        with (
+            patch.object(
+                radix_attention_module,
+                "get_tc_piecewise_forward_context",
+                return_value=context,
+            ),
+            patch.object(
+                radix_attention_module, "get_attn_backend", return_value=backend
+            ),
+            patch.object(
+                radix_attention_module,
+                "unified_attention_with_output",
+                side_effect=output_only,
+            ),
+        ):
+            output = layer(query, query, query, forward_batch)
+
+        self.assertTrue(torch.all(output == 5))
+        self.assertIs(calls[0]["key_cache"], key_cache)
+        self.assertIs(calls[0]["value_cache"], value_cache)
+        self.assertIs(calls[0]["out_cache_loc"], out_cache_loc)
+        pool.get_key_buffer.assert_called_once_with(layer.layer_id)
+        pool.get_value_buffer.assert_called_once_with(layer.layer_id)
+
     def test_lse_fake_impl_declares_shape_and_dtype(self):
         query = torch.empty((5, 3, 7), dtype=torch.float16)
         output = torch.empty_like(query)
