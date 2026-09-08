@@ -19,6 +19,9 @@ from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
     is_fia_nz,
     is_mla_preprocess_enabled,
 )
+from sglang.srt.hardware_backend.npu.graph_runner.torch_compile_diagnostics import (
+    use_direct_graph_attention_diagnostic,
+)
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.dsa.utils import is_dsa_enable_prefill_cp
 from sglang.srt.layers.radix_attention import AttentionType
@@ -340,6 +343,9 @@ class AscendAttnBackend(AttentionBackend):
         self.use_fa = get_bool_env_var("ASCEND_USE_FA", "False")
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
         self.enable_torch_compile = get_flags().capture.enable_torch_compile
+        self._direct_graph_attention_diagnostic = (
+            use_direct_graph_attention_diagnostic()
+        )
         self.speculative_num_draft_tokens = get_spec().speculative_num_draft_tokens
         if (
             self.speculative_num_draft_tokens is not None
@@ -2536,7 +2542,10 @@ class AscendAttnBackend(AttentionBackend):
                 topk_indices,
             )
 
-        if self.graph_mode and (not self.enable_torch_compile):
+        if self.graph_mode and (
+            not self.enable_torch_compile
+            or self._direct_graph_attention_diagnostic
+        ):
             return self.forward_decode_graph(
                 q,
                 k,

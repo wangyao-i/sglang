@@ -45,6 +45,10 @@ from sglang.srt.compilation.torch_compile_decoration import (
 )
 from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.environ import envs
+from sglang.srt.hardware_backend.npu.graph_runner.torch_compile_diagnostics import (
+    get_torch_compile_diagnostic_mode,
+    use_direct_graph_attention_diagnostic,
+)
 from sglang.srt.model_executor.runner import DecodeCudaGraphRunner
 from sglang.srt.utils import (
     empty_context,
@@ -60,17 +64,6 @@ if is_npu:
     from torch_npu.profiler import ProfilerActivity, profile
 
 logger = logging.getLogger(__name__)
-
-_TORCH_COMPILE_DIAGNOSTIC_ENV = "SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC"
-_TORCH_COMPILE_DIAGNOSTIC_MODES = frozenset(
-    {
-        "prepared-eager",
-        "dynamo-eager",
-        "context-eager",
-        "audio-prepared-eager",
-        "language-prepared-eager",
-    }
-)
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
@@ -142,16 +135,12 @@ def patch_model_npu(
     tp_group: GroupCoordinator,
 ):
     if enable_compile:
-        diagnostic_mode = os.environ.get(_TORCH_COMPILE_DIAGNOSTIC_ENV)
-        if diagnostic_mode and diagnostic_mode not in _TORCH_COMPILE_DIAGNOSTIC_MODES:
-            raise ValueError(
-                f"Unsupported {_TORCH_COMPILE_DIAGNOSTIC_ENV}={diagnostic_mode!r}; "
-                f"expected one of {sorted(_TORCH_COMPILE_DIAGNOSTIC_MODES)}"
-            )
-        if diagnostic_mode == "context-eager":
+        diagnostic_mode = get_torch_compile_diagnostic_mode()
+        if diagnostic_mode in {"context-eager", "direct-graph-eager"}:
             logger.warning(
-                "NPU torch.compile diagnostic mode context-eager: using raw "
-                "model.forward without compile-safe fused-op dispatch"
+                "NPU torch.compile diagnostic mode %s: using raw model.forward "
+                "without compile-safe fused-op dispatch",
+                diagnostic_mode,
             )
             yield model.forward
             return
@@ -298,7 +287,7 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
             num_tokens=num_tokens,
             raw_num_tokens=num_tokens,
             full_graph=True,
-            use_decode_graph_attention=True,
+            use_decode_graph_attention=not use_direct_graph_attention_diagnostic(),
         )
 
     def _get_update_attr_name(self):
