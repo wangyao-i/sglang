@@ -434,6 +434,17 @@ def test_compile_safe_attention_calls_decode_graph_implementation():
     assert torch.equal(output, torch.full_like(output, 3))
 
 
+def test_npu_prefill_capture_only_diagnostic_gate(monkeypatch):
+    from sglang.srt.model_executor import model_runner
+
+    monkeypatch.setattr(model_runner, "_is_npu", True)
+    monkeypatch.delenv("SGLANG_NPU_PREFILL_GRAPH_CAPTURE_ONLY", raising=False)
+    assert not model_runner._skip_npu_prefill_graph_replay_for_diagnostics()
+
+    monkeypatch.setenv("SGLANG_NPU_PREFILL_GRAPH_CAPTURE_ONLY", "true")
+    assert model_runner._skip_npu_prefill_graph_replay_for_diagnostics()
+
+
 def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
     root = Path(__file__).resolve().parents[5]
     model_runner_source = (

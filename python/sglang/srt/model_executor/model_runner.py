@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -228,6 +229,14 @@ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.weight_checker import WeightChecker
 
 _is_npu = is_npu()
+
+
+def _skip_npu_prefill_graph_replay_for_diagnostics() -> bool:
+    return _is_npu and os.getenv(
+        "SGLANG_NPU_PREFILL_GRAPH_CAPTURE_ONLY", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu_arm64 = is_host_cpu_arm64()
 
@@ -1750,6 +1759,7 @@ class ModelRunner:
                 )
             elif (
                 forward_batch.forward_mode.is_extend(include_draft_extend_v2=True)
+                and not _skip_npu_prefill_graph_replay_for_diagnostics()
                 and not isinstance(self.prefill_cuda_graph_runner, EagerRunner)
                 and self.prefill_cuda_graph_runner is not None
                 and self.prefill_cuda_graph_runner.can_run_graph(forward_batch)
