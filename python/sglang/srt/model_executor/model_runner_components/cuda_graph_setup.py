@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import logging
+import os
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Optional
@@ -86,6 +88,39 @@ class CudaGraphsCapture(msgspec.Struct, frozen=True, kw_only=True):
         )
 
 
+def _release_npu_prefill_capture_for_diagnostics(
+    prefill: GraphCapture,
+    eager_runner: EagerRunner,
+    device_module,
+) -> GraphCapture:
+    """Drop a completed prefill capture before decode graph construction.
+
+    This opt-in diagnostic distinguishes persistent graph/static-buffer
+    ownership from an irreversible side effect of graph capture itself.  It
+    must never change the default graph lifecycle.
+    """
+    capture_time = prefill.capture_time
+    captured_runner = prefill.runner
+    if captured_runner is None or captured_runner is eager_runner:
+        raise RuntimeError(
+            "NPU prefill capture-release diagnostic requires a captured runner"
+        )
+    backend = getattr(captured_runner, "backend", None)
+    if backend is None or not hasattr(backend, "cleanup"):
+        raise RuntimeError(
+            "NPU prefill capture-release diagnostic requires backend cleanup"
+        )
+
+    device_module.synchronize()
+    backend.cleanup()
+    return GraphCapture(
+        runner=eager_runner,
+        memory_phase="prefill",
+        memory_usage_gb=0,
+        capture_time=capture_time,
+    )
+
+
 def capture_cuda_graphs(
     *, model_runner: ModelRunner, capture_decode_cuda_graph: bool = True
 ) -> CudaGraphsCapture:
@@ -166,6 +201,21 @@ def capture_cuda_graphs(
     prefill = capture_prefill_graph(
         model_runner=model_runner, eager_runner=eager_runner
     )
+    if model_runner.device == "npu" and os.getenv(
+        "SGLANG_NPU_PREFILL_GRAPH_CAPTURE_RELEASE", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}:
+        prefill = _release_npu_prefill_capture_for_diagnostics(
+            prefill, eager_runner, model_runner.device_module
+        )
+        # Assignment above removes the caller's final GraphCapture -> runner
+        # reference. Collect only now so the runner's static buffers, not just
+        # its backend graph handles, are deterministically released.
+        gc.collect()
+        model_runner.device_module.synchronize()
+        logger.warning(
+            "NPU prefill graph capture-release diagnostic active: captured "
+            "graph was destroyed before decode graph construction"
+        )
 
     decode_phase = "draft_decode" if model_runner.is_draft_worker else "decode"
     decode = GraphCapture(

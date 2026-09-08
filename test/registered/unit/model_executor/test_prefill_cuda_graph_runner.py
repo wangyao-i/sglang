@@ -62,6 +62,30 @@ class _FakeKVIndexKernel:
 
 
 class TestPrefillCudaGraphRunnerChunkedPrefix(CustomTestCase):
+    def test_npu_capture_release_diagnostic_cleans_backend(self):
+        calls = []
+        backend = SimpleNamespace(cleanup=lambda: calls.append("cleanup"))
+        captured_runner = SimpleNamespace(backend=backend)
+        eager_runner = object()
+        device_module = SimpleNamespace(
+            synchronize=lambda: calls.append("synchronize")
+        )
+        capture = graph_setup.GraphCapture(
+            runner=captured_runner,
+            memory_phase="prefill",
+            memory_usage_gb=1.25,
+            capture_time=2.5,
+        )
+
+        released = graph_setup._release_npu_prefill_capture_for_diagnostics(
+            capture, eager_runner, device_module
+        )
+
+        self.assertIs(released.runner, eager_runner)
+        self.assertEqual(released.memory_usage_gb, 0)
+        self.assertEqual(released.capture_time, 2.5)
+        self.assertEqual(calls, ["synchronize", "cleanup"])
+
     def test_low_free_memory_still_captures_prefill_graph(self):
         eager_runner = object()
         prefill_runner = object()
