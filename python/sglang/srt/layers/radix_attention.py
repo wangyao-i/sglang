@@ -173,7 +173,7 @@ class RadixAttention(nn.Module):
                 forward_batch.forward_mode.is_extend()
                 or (
                     forward_batch.forward_mode.is_decode()
-                    and context.use_decode_graph_attention
+                    and getattr(context, "use_decode_graph_attention", False)
                 )
             )
             # ``_force_eager_attn`` is only set inside Inkling's eager
@@ -256,7 +256,7 @@ class RadixAttention(nn.Module):
                 and mha_companion_layers[self.layer_id] is self
             )
             if (
-                context.use_decode_graph_attention
+                getattr(context, "use_decode_graph_attention", False)
                 and forward_batch.forward_mode.is_decode()
                 and key_value_num_tokens is None
                 and not return_lse
