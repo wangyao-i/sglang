@@ -255,6 +255,24 @@ class RadixAttention(nn.Module):
                 mha_companion_layers is not None
                 and mha_companion_layers[self.layer_id] is self
             )
+            if (
+                context.use_decode_graph_attention
+                and forward_batch.forward_mode.is_decode()
+                and key_value_num_tokens is None
+                and not return_lse
+            ):
+                return npu_decode_attention(
+                    q,
+                    k,
+                    v,
+                    output,
+                    save_kv_cache,
+                    self.layer_id,
+                    use_mha_companion=use_mha_companion,
+                    q_rope=kwargs.get("q_rope"),
+                    k_rope=kwargs.get("k_rope"),
+                    sinks=kwargs.get("sinks"),
+                )
             if is_in_breakable_cuda_graph():
                 op = (
                     breakable_unified_attention_with_output_and_lse
@@ -293,6 +311,101 @@ class RadixAttention(nn.Module):
             )
 
 
+def _npu_decode_attention_impl(
+    query: torch.Tensor,
+    key: Optional[torch.Tensor],
+    value: Optional[torch.Tensor],
+    output_template: torch.Tensor,
+    save_kv_cache: bool,
+    layer_id: int,
+    use_mha_companion: bool,
+    *,
+    q_rope: Optional[torch.Tensor] = None,
+    k_rope: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Run NPU decode attention with a functional custom-op contract.
+
+    The backend already returns the graph-owned attention tensor.  Returning
+    that tensor directly keeps its ownership identical to the known-correct
+    eager NPU graph path and avoids translating it into an in-place write to a
+    separately allocated output buffer.
+    """
+    del output_template
+    context = get_tc_piecewise_forward_context()
+    forward_batch = context.forward_batch
+    attention_layer = context.attention_layers[layer_id]
+    if use_mha_companion:
+        assert context.mha_companion_layers is not None
+        attention_layer = context.mha_companion_layers[layer_id]
+        assert attention_layer is not None
+
+    graph_kwargs = {}
+    if q_rope is not None:
+        graph_kwargs["q_rope"] = q_rope
+    if k_rope is not None:
+        graph_kwargs["k_rope"] = k_rope
+    if sinks is not None:
+        graph_kwargs["sinks"] = sinks
+
+    ret = get_attn_backend().forward_decode_graph(
+        query,
+        key,
+        value,
+        attention_layer,
+        forward_batch,
+        save_kv_cache,
+        **graph_kwargs,
+    )
+    assert isinstance(ret, torch.Tensor)
+    return ret
+
+
+def _npu_decode_attention_fake(
+    query: torch.Tensor,
+    key: Optional[torch.Tensor],
+    value: Optional[torch.Tensor],
+    output_template: torch.Tensor,
+    save_kv_cache: bool,
+    layer_id: int,
+    use_mha_companion: bool,
+    *,
+    q_rope: Optional[torch.Tensor] = None,
+    k_rope: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    return torch.empty_like(output_template)
+
+
+@register_custom_op(fake_impl=_npu_decode_attention_fake)
+@register_split_op()
+def npu_decode_attention(
+    query: torch.Tensor,
+    key: Optional[torch.Tensor],
+    value: Optional[torch.Tensor],
+    output_template: torch.Tensor,
+    save_kv_cache: bool,
+    layer_id: int,
+    use_mha_companion: bool,
+    *,
+    q_rope: Optional[torch.Tensor] = None,
+    k_rope: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    return _npu_decode_attention_impl(
+        query,
+        key,
+        value,
+        output_template,
+        save_kv_cache,
+        layer_id,
+        use_mha_companion,
+        q_rope=q_rope,
+        k_rope=k_rope,
+        sinks=sinks,
+    )
+
+
 def _unified_attention_with_output_impl(
     query: torch.Tensor,
     key: Optional[torch.Tensor],
@@ -319,20 +432,6 @@ def _unified_attention_with_output_impl(
     attention_layers = context.attention_layers
     attention_layer = attention_layers[layer_id]
 
-    # NPU Torch-Compile decode graphs need this custom-op boundary so Dynamo
-    # does not trace the backend's driver queries. Unlike ordinary PCG, their
-    # backend already consumes the graph's static Q/K/V and ForwardBatch
-    # buffers. Narrowing those buffers here changes the graph-visible state and
-    # diverges from the known-correct direct NPU decode-graph path.
-    use_direct_npu_decode_graph = (
-        getattr(context, "use_decode_graph_attention", False)
-        and forward_batch.forward_mode.is_decode()
-        # Prefix-MHA has a distinct K/V extent and LSE contract. Preserve its
-        # established generic PCG handling until it has its own NPU parity run.
-        and key_value_num_tokens is None
-        and not return_lse
-    )
-
     # DeepSeek MLA has two RadixAttention instances per layer (attn_mqa and
     # attn_mha) that share the same layer_id. Preserve the calling instance's
     # identity through the custom-op boundary; save_kv_cache is not an identity
@@ -341,34 +440,6 @@ def _unified_attention_with_output_impl(
         assert context.mha_companion_layers is not None
         attention_layer = context.mha_companion_layers[layer_id]
         assert attention_layer is not None
-
-    if use_direct_npu_decode_graph:
-        graph_kwargs = {}
-        if q_rope is not None:
-            graph_kwargs["q_rope"] = q_rope
-        if k_rope is not None:
-            graph_kwargs["k_rope"] = k_rope
-        if sinks is not None:
-            graph_kwargs["sinks"] = sinks
-
-        ret = get_attn_backend().forward_decode_graph(
-            query,
-            key,
-            value,
-            attention_layer,
-            forward_batch,
-            save_kv_cache,
-            **graph_kwargs,
-        )
-        lse = None
-        if return_lse:
-            assert isinstance(ret, tuple)
-            ret, lse, *_ = ret
-        else:
-            assert isinstance(ret, torch.Tensor)
-        if ret.data_ptr() != output.data_ptr():
-            output.view(ret.shape).copy_(ret)
-        return lse
 
     real_query_num_tokens = forward_batch.num_token_non_padded_cpu
     # Ordinary PCG attention pads Q/K/V to the same token bucket. Prefix MHA

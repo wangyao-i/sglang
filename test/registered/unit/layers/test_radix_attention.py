@@ -342,7 +342,7 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         self.assertIs(forward_batch.positions, original_positions)
         self.assertIs(forward_batch._attn_output, original_attn_output)
 
-    def test_npu_decode_graph_custom_op_preserves_static_batch_state(self):
+    def test_npu_decode_graph_custom_op_returns_backend_tensor(self):
         attention_layer = SimpleNamespace()
         original_output = object()
         forward_batch = SimpleNamespace(
@@ -363,20 +363,21 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         original_out_cache_loc = forward_batch.out_cache_loc
         original_positions = forward_batch.positions
         backend = SimpleNamespace()
+        backend_output = torch.full((4, 2, 3), 9.0)
 
         def forward_decode_graph(query, key, value, *args, **kwargs):
             self.assertEqual(query.shape, (4, 2, 3))
             self.assertEqual(key.shape, (4, 2, 3))
             self.assertEqual(value.shape, (4, 2, 3))
             self.assertIs(args[1], forward_batch)
-            return torch.full_like(query, 9)
+            return backend_output
 
         backend.forward_decode_graph = Mock(side_effect=forward_decode_graph)
         backend.forward = Mock(
             side_effect=AssertionError("ordinary backend path selected")
         )
         query = torch.zeros((4, 2, 3))
-        output = torch.empty_like(query)
+        output_template = torch.empty_like(query)
 
         with (
             patch.object(
@@ -388,24 +389,70 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
                 radix_attention_module, "get_attn_backend", return_value=backend
             ),
         ):
-            lse = radix_attention_module._unified_attention_with_output_impl(
+            output = radix_attention_module._npu_decode_attention_impl(
                 query,
                 query,
                 query,
-                output,
+                output_template,
                 True,
                 0,
                 False,
-                False,
             )
 
-        self.assertIsNone(lse)
+        self.assertIs(output, backend_output)
+        self.assertIsNot(output, output_template)
         backend.forward_decode_graph.assert_called_once()
         backend.forward.assert_not_called()
-        self.assertTrue(torch.all(output == 9))
         self.assertIs(forward_batch.out_cache_loc, original_out_cache_loc)
         self.assertIs(forward_batch.positions, original_positions)
         self.assertIs(forward_batch._attn_output, original_output)
+
+    def test_decode_dispatch_uses_functional_npu_custom_op(self):
+        layer = self._new_layer()
+        forward_batch = SimpleNamespace(
+            forward_mode=ForwardMode.DECODE,
+            mha_return_lse=False,
+        )
+        context = SimpleNamespace(
+            mha_companion_layers=None,
+            use_decode_graph_attention=True,
+        )
+        query = torch.zeros((2, 2, 3))
+        backend_output = torch.full_like(query, 7)
+
+        with (
+            patch.object(
+                radix_attention_module,
+                "get_tc_piecewise_forward_context",
+                return_value=context,
+            ),
+            patch.object(
+                radix_attention_module,
+                "npu_decode_attention",
+                return_value=backend_output,
+            ) as functional_op,
+        ):
+            output = layer(query, query, query, forward_batch)
+
+        self.assertIs(output, backend_output)
+        functional_op.assert_called_once()
+
+    def test_npu_decode_attention_fake_matches_output_template(self):
+        query = torch.empty((2, 4, 8), dtype=torch.float32)
+        output_template = torch.empty((2, 32), dtype=torch.bfloat16)
+
+        output = radix_attention_module._npu_decode_attention_fake(
+            query,
+            query,
+            query,
+            output_template,
+            True,
+            0,
+            False,
+        )
+
+        self.assertEqual(output.shape, output_template.shape)
+        self.assertEqual(output.dtype, output_template.dtype)
 
     def test_lse_fake_impl_declares_shape_and_dtype(self):
         query = torch.empty((5, 3, 7), dtype=torch.float16)
