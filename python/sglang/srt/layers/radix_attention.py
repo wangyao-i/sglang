@@ -265,6 +265,37 @@ class RadixAttention(nn.Module):
                 if use_mha_companion:
                     attention_layer = mha_companion_layers[self.layer_id]
                     assert attention_layer is not None
+                if getattr(
+                    context, "use_explicit_decode_attention_state", False
+                ):
+                    backend = get_attn_backend()
+                    (
+                        out_cache_loc,
+                        seq_lens,
+                        block_tables,
+                        key_cache,
+                        value_cache,
+                    ) = backend.get_decode_graph_compile_state(
+                        attention_layer, forward_batch
+                    )
+                    npu_decode_attention_with_explicit_state(
+                        q,
+                        k,
+                        v,
+                        output,
+                        out_cache_loc,
+                        seq_lens,
+                        block_tables,
+                        key_cache,
+                        value_cache,
+                        save_kv_cache,
+                        self.layer_id,
+                        use_mha_companion=use_mha_companion,
+                        q_rope=kwargs.get("q_rope"),
+                        k_rope=kwargs.get("k_rope"),
+                        sinks=kwargs.get("sinks"),
+                    )
+                    return output
                 return _npu_decode_attention_graph_break(
                     q,
                     k,
@@ -353,6 +384,91 @@ def _npu_decode_attention_graph_break(
     )
     assert isinstance(ret, torch.Tensor)
     return ret
+
+
+def _same_storage(actual: torch.Tensor, expected: torch.Tensor) -> bool:
+    return (
+        actual.device == expected.device
+        and actual.untyped_storage().data_ptr()
+        == expected.untyped_storage().data_ptr()
+    )
+
+
+@register_custom_op(mutates_args=["output", "key_cache", "value_cache"])
+def npu_decode_attention_with_explicit_state(
+    query: torch.Tensor,
+    key: Optional[torch.Tensor],
+    value: Optional[torch.Tensor],
+    output: torch.Tensor,
+    out_cache_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    save_kv_cache: bool,
+    layer_id: int,
+    *,
+    use_mha_companion: bool = False,
+    q_rope: Optional[torch.Tensor] = None,
+    k_rope: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+) -> None:
+    """Run NPU decode attention with an explicit state/mutation contract.
+
+    The backend remains opaque to Dynamo, but the graph now carries every
+    dynamic tensor it reads and both KV-cache tensors it mutates. Runtime
+    identity checks prevent the Python context from silently selecting stale
+    buffers. This candidate is opt-in until NPU accuracy and performance gates
+    establish parity with the eager graph-break path.
+    """
+    context = get_tc_piecewise_forward_context()
+    if context is None or context.forward_batch is None:
+        raise RuntimeError("explicit-state NPU decode attention requires TC context")
+    attention_layers = context.attention_layers
+    if attention_layers is None:
+        raise RuntimeError("explicit-state NPU decode attention has no layer registry")
+    attention_layer = attention_layers[layer_id]
+    if use_mha_companion:
+        if context.mha_companion_layers is None:
+            raise RuntimeError("missing MHA companion layer registry")
+        attention_layer = context.mha_companion_layers[layer_id]
+    if attention_layer is None:
+        raise RuntimeError(f"missing attention layer {layer_id}")
+
+    backend = get_attn_backend()
+    expected_state = backend.get_decode_graph_compile_state(
+        attention_layer, context.forward_batch
+    )
+    actual_state = (out_cache_loc, seq_lens, block_tables, key_cache, value_cache)
+    names = ("out_cache_loc", "seq_lens", "block_tables", "key_cache", "value_cache")
+    for name, actual, expected in zip(names, actual_state, expected_state):
+        if not _same_storage(actual, expected):
+            raise RuntimeError(
+                f"explicit-state NPU decode attention received stale {name} storage"
+            )
+
+    graph_kwargs = {}
+    if q_rope is not None:
+        graph_kwargs["q_rope"] = q_rope
+    if k_rope is not None:
+        graph_kwargs["k_rope"] = k_rope
+    if sinks is not None:
+        graph_kwargs["sinks"] = sinks
+    ret = backend.forward_decode_graph(
+        query,
+        key,
+        value,
+        attention_layer,
+        context.forward_batch,
+        save_kv_cache,
+        **graph_kwargs,
+    )
+    if not isinstance(ret, torch.Tensor):
+        raise RuntimeError(
+            "explicit-state NPU decode attention requires a tensor output"
+        )
+    if ret.data_ptr() != output.data_ptr():
+        output.view(ret.shape).copy_(ret)
 
 
 def _unified_attention_with_output_impl(

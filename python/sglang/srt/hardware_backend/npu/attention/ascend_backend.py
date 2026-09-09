@@ -407,6 +407,59 @@ class AscendAttnBackend(AttentionBackend):
             and layer.sliding_window_size > -1
         )
 
+    def get_decode_graph_compile_state(
+        self,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Return the tensor ABI for compiled non-MLA decode attention.
+
+        The ordinary custom-op path reaches these tensors through backend and
+        ForwardBatch Python objects. Dynamo therefore cannot represent either
+        their data dependency or the KV-cache mutation. The explicit-state
+        candidate passes the same live graph buffers through the operator
+        schema and verifies that the opaque implementation still consumes
+        those exact buffers.
+
+        Keep unsupported attention variants on the established eager graph
+        break until they have their own tensor ABI and hardware parity gate.
+        """
+        if self.use_mla or self.is_hybrid_swa or self._is_swa_layer(layer):
+            raise RuntimeError(
+                "explicit-state NPU decode attention currently supports only "
+                "non-MLA, non-SWA attention"
+            )
+        metadata = self.forward_metadata
+        if metadata is None:
+            raise RuntimeError("NPU decode attention metadata is not initialized")
+        state = (
+            forward_batch.out_cache_loc,
+            metadata.seq_lens_cpu_int,
+            metadata.block_tables,
+            self.token_to_kv_pool.get_key_buffer(layer.layer_id),
+            self.token_to_kv_pool.get_value_buffer(layer.layer_id),
+        )
+        names = (
+            "out_cache_loc",
+            "seq_lens_cpu_int",
+            "block_tables",
+            "key_cache",
+            "value_cache",
+        )
+        for name, tensor in zip(names, state):
+            if not isinstance(tensor, torch.Tensor):
+                raise RuntimeError(
+                    f"explicit-state NPU decode attention requires tensor {name}, "
+                    f"got {type(tensor).__name__}"
+                )
+        return state
+
     @staticmethod
     def _can_use_tnd(layer: RadixAttention) -> bool:
         """Check if TND layout is supported."""

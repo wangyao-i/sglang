@@ -22,6 +22,11 @@ TORCH_COMPILE_DIAGNOSTIC_MODES = frozenset(
         # unified-attention custom-op wrapper. This isolates the wrapper's
         # metadata/output handling from AscendAttentionBackend.forward_decode_graph.
         "direct-graph-eager",
+        # Keep NPU decode attention as an opaque custom op, but make every
+        # dynamic ForwardBatch/KV dependency an explicit tensor operand. This
+        # is the candidate path for restoring compile continuity without
+        # reintroducing the stale-state corruption fixed by the eager break.
+        "explicit-state-attention",
     }
 )
 
@@ -40,3 +45,8 @@ def get_torch_compile_diagnostic_mode() -> Optional[str]:
 def use_direct_graph_attention_diagnostic() -> bool:
     """Whether a diagnostic run must bypass the TC attention custom op."""
     return get_torch_compile_diagnostic_mode() == "direct-graph-eager"
+
+
+def use_explicit_state_attention_diagnostic() -> bool:
+    """Whether decode attention uses the explicit-state custom-op candidate."""
+    return get_torch_compile_diagnostic_mode() == "explicit-state-attention"

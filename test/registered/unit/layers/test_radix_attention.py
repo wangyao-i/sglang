@@ -306,6 +306,71 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
             {"q_rope": None, "k_rope": None, "sinks": None},
         )
 
+    def test_decode_compile_can_dispatch_with_explicit_state_operands(self):
+        layer = self._new_layer()
+        forward_batch = SimpleNamespace(
+            forward_mode=ForwardMode.DECODE,
+            mha_return_lse=False,
+        )
+        context = SimpleNamespace(
+            mha_companion_layers=None,
+            use_decode_graph_attention=True,
+            use_explicit_decode_attention_state=True,
+        )
+        query = torch.zeros((2, 2, 3))
+        state = (
+            torch.arange(2),
+            torch.arange(2, dtype=torch.int32),
+            torch.zeros((2, 1), dtype=torch.int32),
+            torch.zeros((4, 2, 3)),
+            torch.zeros((4, 2, 3)),
+        )
+        backend = SimpleNamespace(
+            get_decode_graph_compile_state=Mock(return_value=state)
+        )
+
+        with (
+            patch.object(
+                radix_attention_module,
+                "get_tc_piecewise_forward_context",
+                return_value=context,
+            ),
+            patch.object(
+                radix_attention_module, "get_attn_backend", return_value=backend
+            ),
+            patch.object(
+                radix_attention_module,
+                "npu_decode_attention_with_explicit_state",
+            ) as explicit_op,
+            patch.object(
+                radix_attention_module, "_npu_decode_attention_graph_break"
+            ) as graph_break,
+        ):
+            output = layer(query, query, query, forward_batch)
+
+        backend.get_decode_graph_compile_state.assert_called_once_with(
+            layer, forward_batch
+        )
+        explicit_op.assert_called_once()
+        args = explicit_op.call_args.args
+        self.assertIs(args[0], query)
+        self.assertEqual(args[3].shape, query.shape)
+        for actual, expected in zip(args[4:9], state):
+            self.assertIs(actual, expected)
+        self.assertTrue(args[9])
+        self.assertEqual(args[10], layer.layer_id)
+        self.assertEqual(
+            explicit_op.call_args.kwargs,
+            {
+                "use_mha_companion": False,
+                "q_rope": None,
+                "k_rope": None,
+                "sinks": None,
+            },
+        )
+        graph_break.assert_not_called()
+        self.assertEqual(output.shape, query.shape)
+
     def test_impl_preserves_output_only_contract(self):
         attention_layer = SimpleNamespace()
         context = self._new_impl_context([attention_layer])

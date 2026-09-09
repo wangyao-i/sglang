@@ -86,6 +86,9 @@ class TcPiecewiseForwardContext:
     # This prevents Dynamo from tracing Triton-Ascend driver queries and avoids
     # selecting the eager ATB paged-attention path during NPUGraph capture.
     use_decode_graph_attention: bool = False
+    # Opt-in NPU candidate: keep decode attention inside the compiled model
+    # while exposing ForwardBatch/KV state as explicit custom-op operands.
+    use_explicit_decode_attention_state: bool = False
 
 
 _tc_piecewise_forward_context: Optional[TcPiecewiseForwardContext] = None
@@ -108,6 +111,7 @@ def set_tc_piecewise_forward_context(
     raw_num_tokens: Optional[int] = None,
     full_graph: bool = False,
     use_decode_graph_attention: bool = False,
+    use_explicit_decode_attention_state: bool = False,
 ):
     global _tc_piecewise_forward_context
     _tc_piecewise_forward_context = TcPiecewiseForwardContext(
@@ -122,6 +126,7 @@ def set_tc_piecewise_forward_context(
         raw_num_tokens=raw_num_tokens,
         full_graph=full_graph,
         use_decode_graph_attention=use_decode_graph_attention,
+        use_explicit_decode_attention_state=use_explicit_decode_attention_state,
     )
     try:
         yield

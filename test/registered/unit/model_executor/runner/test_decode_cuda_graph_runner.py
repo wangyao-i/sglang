@@ -316,6 +316,7 @@ def test_npu_compile_context_requests_graph_safe_decode_attention():
         assert context.raw_num_tokens == 4
         assert context.full_graph is True
         assert context.use_decode_graph_attention is True
+        assert context.use_explicit_decode_attention_state is False
 
     assert get_tc_piecewise_forward_context() is None
 
@@ -360,11 +361,13 @@ def test_npu_torch_compile_diagnostic_mode_is_validated():
     from sglang.srt.hardware_backend.npu.graph_runner.torch_compile_diagnostics import (
         get_torch_compile_diagnostic_mode,
         use_direct_graph_attention_diagnostic,
+        use_explicit_state_attention_diagnostic,
     )
 
     with mock.patch.dict(os.environ, {}, clear=True):
         assert get_torch_compile_diagnostic_mode() is None
         assert use_direct_graph_attention_diagnostic() is False
+        assert use_explicit_state_attention_diagnostic() is False
 
     with mock.patch.dict(
         os.environ,
@@ -373,6 +376,16 @@ def test_npu_torch_compile_diagnostic_mode_is_validated():
     ):
         assert get_torch_compile_diagnostic_mode() == "direct-graph-eager"
         assert use_direct_graph_attention_diagnostic() is True
+        assert use_explicit_state_attention_diagnostic() is False
+
+    with mock.patch.dict(
+        os.environ,
+        {"SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC": "explicit-state-attention"},
+        clear=True,
+    ):
+        assert get_torch_compile_diagnostic_mode() == "explicit-state-attention"
+        assert use_direct_graph_attention_diagnostic() is False
+        assert use_explicit_state_attention_diagnostic() is True
 
     with mock.patch.dict(
         os.environ,
@@ -381,6 +394,39 @@ def test_npu_torch_compile_diagnostic_mode_is_validated():
     ):
         with pytest.raises(ValueError, match="Unsupported"):
             get_torch_compile_diagnostic_mode()
+
+
+def test_explicit_state_attention_diagnostic_reaches_compile_context():
+    from sglang.srt.hardware_backend.npu.graph_runner.npu_graph_runner import (
+        NPUGraphRunner,
+    )
+    from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+        get_tc_piecewise_forward_context,
+    )
+
+    fake_self = SimpleNamespace(
+        enable_torch_compile=True,
+        model_runner=SimpleNamespace(
+            attention_layers=[object()],
+            quant_config=None,
+            moe_layers=[],
+            moe_fusions=[],
+            dsa_indexers=None,
+            mha_companion_layers=None,
+        ),
+    )
+    with mock.patch.dict(
+        os.environ,
+        {"SGLANG_NPU_TORCH_COMPILE_DIAGNOSTIC": "explicit-state-attention"},
+        clear=True,
+    ):
+        with NPUGraphRunner._torch_compile_forward_context(
+            fake_self, object(), num_tokens=4
+        ):
+            context = get_tc_piecewise_forward_context()
+            assert context is not None
+            assert context.use_decode_graph_attention is True
+            assert context.use_explicit_decode_attention_state is True
 
 
 def test_compile_safe_attention_calls_decode_graph_implementation():

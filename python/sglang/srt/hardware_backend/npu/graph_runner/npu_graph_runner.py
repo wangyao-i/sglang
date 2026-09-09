@@ -48,6 +48,7 @@ from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.graph_runner.torch_compile_diagnostics import (
     get_torch_compile_diagnostic_mode,
     use_direct_graph_attention_diagnostic,
+    use_explicit_state_attention_diagnostic,
 )
 from sglang.srt.model_executor.runner import DecodeCudaGraphRunner
 from sglang.srt.utils import (
@@ -292,6 +293,9 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
             raw_num_tokens=num_tokens,
             full_graph=True,
             use_decode_graph_attention=not use_direct_graph_attention_diagnostic(),
+            use_explicit_decode_attention_state=(
+                use_explicit_state_attention_diagnostic()
+            ),
         )
 
     def _get_update_attr_name(self):
