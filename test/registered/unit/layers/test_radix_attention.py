@@ -270,6 +270,8 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         context = self._new_impl_context([attention_layer])
         forward_batch = context.forward_batch
         original_out_cache_loc = forward_batch.out_cache_loc
+        original_attn_output = object()
+        forward_batch._attn_output = original_attn_output
         backend = _RecordingAttentionBackend(return_lse=False)
         query = torch.zeros((4, 2, 3))
         output = torch.empty_like(query)
@@ -299,6 +301,46 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         self.assertIs(backend.calls[-1].attention_layer, attention_layer)
         self.assertTrue(torch.all(output[:2] == 3))
         self.assertIs(forward_batch.out_cache_loc, original_out_cache_loc)
+        self.assertIs(forward_batch._attn_output, original_attn_output)
+
+    def test_impl_restores_output_buffer_after_backend_error(self):
+        attention_layer = SimpleNamespace()
+        context = self._new_impl_context([attention_layer])
+        forward_batch = context.forward_batch
+        original_out_cache_loc = forward_batch.out_cache_loc
+        original_positions = forward_batch.positions
+        original_attn_output = object()
+        forward_batch._attn_output = original_attn_output
+        backend = _RecordingAttentionBackend()
+        backend.forward = Mock(side_effect=RuntimeError("backend failed"))
+        query = torch.zeros((4, 2, 3))
+        output = torch.empty_like(query)
+
+        with (
+            patch.object(
+                radix_attention_module,
+                "get_tc_piecewise_forward_context",
+                return_value=context,
+            ),
+            patch.object(
+                radix_attention_module, "get_attn_backend", return_value=backend
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "backend failed"):
+                radix_attention_module._unified_attention_with_output_impl(
+                    query,
+                    query,
+                    query,
+                    output,
+                    False,
+                    0,
+                    False,
+                    False,
+                )
+
+        self.assertIs(forward_batch.out_cache_loc, original_out_cache_loc)
+        self.assertIs(forward_batch.positions, original_positions)
+        self.assertIs(forward_batch._attn_output, original_attn_output)
 
     def test_npu_decode_graph_custom_op_preserves_static_batch_state(self):
         attention_layer = SimpleNamespace()

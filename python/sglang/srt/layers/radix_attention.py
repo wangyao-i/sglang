@@ -401,6 +401,7 @@ def _unified_attention_with_output_impl(
 
     original_out_cache_loc = forward_batch.out_cache_loc
     original_positions = forward_batch.positions
+    original_attn_output = forward_batch._attn_output
     # Keep the original ForwardBatch object and only narrow cache locations for
     # this backend call so model/backend state is still written to the same batch.
     forward_batch.out_cache_loc = original_out_cache_loc[:real_query_num_tokens]
@@ -412,18 +413,24 @@ def _unified_attention_with_output_impl(
     # the FA kernel validates out.size(0) == q.size(0).
     forward_batch._attn_output = output[:real_query_num_tokens]
 
-    attn_backend = get_attn_backend()
-    ret = attn_backend.forward(
-        query,
-        key,
-        value,
-        attention_layer,
-        forward_batch,
-        save_kv_cache,
-        **kwargs,
-    )
-    forward_batch.out_cache_loc = original_out_cache_loc
-    forward_batch.positions = original_positions
+    try:
+        attn_backend = get_attn_backend()
+        ret = attn_backend.forward(
+            query,
+            key,
+            value,
+            attention_layer,
+            forward_batch,
+            save_kv_cache,
+            **kwargs,
+        )
+    finally:
+        # The ForwardBatch can outlive one PCG capture/replay invocation.  Do
+        # not leak this graph-owned static output buffer into a later compiled
+        # decode forward; the next backend call must own its output selection.
+        forward_batch.out_cache_loc = original_out_cache_loc
+        forward_batch.positions = original_positions
+        forward_batch._attn_output = original_attn_output
 
     lse = None
     if return_lse:
