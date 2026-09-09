@@ -94,11 +94,30 @@ def get_batch_sizes_to_capture(
     capture_bs = list(sorted(set(capture_bs)))
 
     assert len(capture_bs) > 0 and capture_bs[0] > 0, f"{capture_bs=}"
-    compile_bs = (
-        [bs for bs in capture_bs if bs <= get_exec().graph.torch_compile_max_bs]
-        if get_flags().capture.enable_torch_compile
-        else []
-    )
+    compile_bs = []
+    if get_flags().capture.enable_torch_compile:
+        explicit_compile_bs = get_exec().graph.cuda_graph_config.decode.torch_compile_bs
+        if explicit_compile_bs is None:
+            compile_bs = [
+                bs for bs in capture_bs if bs <= get_exec().graph.torch_compile_max_bs
+            ]
+        else:
+            if any(
+                not isinstance(bs, int) or isinstance(bs, bool) or bs <= 0
+                for bs in explicit_compile_bs
+            ):
+                raise ValueError(
+                    "cuda_graph_config[decode].torch_compile_bs must contain "
+                    f"positive integers, got {explicit_compile_bs!r}"
+                )
+            compile_bs = sorted(set(explicit_compile_bs))
+            uncaptured = sorted(set(compile_bs) - set(capture_bs))
+            if uncaptured:
+                raise ValueError(
+                    "cuda_graph_config[decode].torch_compile_bs must be a subset "
+                    f"of captured decode batch sizes; uncaptured={uncaptured}, "
+                    f"capture_bs={capture_bs}"
+                )
     return capture_bs, compile_bs
 
 

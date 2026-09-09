@@ -1587,6 +1587,26 @@ class TestPrefillOnlyDisableKvCache(unittest.TestCase):
 
 
 class TestCudaGraphConfigDataclassAccess(CustomTestCase):
+    def test_torch_compile_bs_folds_into_decode_config(self):
+        args = ServerArgs(model_path="dummy", torch_compile_bs=[1, 32, 70])
+        args._parse_cuda_graph_config()
+
+        self.assertEqual(args.cuda_graph_config.decode.torch_compile_bs, [1, 32, 70])
+        self.assertIn(
+            (Phase.DECODE, "torch_compile_bs"),
+            args._cuda_graph_config_locked,
+        )
+
+    def test_explicit_decode_config_overrides_torch_compile_bs_flag(self):
+        args = ServerArgs(
+            model_path="dummy",
+            torch_compile_bs=[1, 2],
+            cuda_graph_config={"decode": {"torch_compile_bs": [32, 70]}},
+        )
+        args._parse_cuda_graph_config()
+
+        self.assertEqual(args.cuda_graph_config.decode.torch_compile_bs, [32, 70])
+
     @patch(
         "sglang.srt.model_executor.runner_backend."
         "tc_piecewise_cuda_graph_backend.get_moe_a2a_backend"

@@ -67,12 +67,20 @@ ALLOWED_BACKENDS_PER_PHASE = {
 # Per-phase settings schema. Keys other than backend are runner-level
 # (read by any backend in that phase); tc_compiler is the lone
 # backend-specific knob (only meaningful when backend == tc_piecewise).
+# torch_compile_bs is decode-only and selects which captured shapes use the
+# model-level torch.compile wrapper.
 # For prefill, bs carries aggregate-token capture buckets for every backend;
 # full_prefill_max_req separately controls Full's fixed request-slot count.
 # full_prefill_max_req and full_prefill_prefix_chunk_tokens are prefill-only and
 # only meaningful when backend == full.
 ALLOWED_KEYS_PER_PHASE = {
-    Phase.DECODE: ("backend", "max_bs", "bs", "tc_compiler"),
+    Phase.DECODE: (
+        "backend",
+        "max_bs",
+        "bs",
+        "tc_compiler",
+        "torch_compile_bs",
+    ),
     Phase.PREFILL: (
         "backend",
         "max_bs",
@@ -93,6 +101,12 @@ class PhaseConfig:
     bs: Optional[List[int]] = None
     # Only meaningful when backend == tc_piecewise; ignored otherwise.
     tc_compiler: str = "eager"
+    # Optional subset of decode graph batch sizes whose model forward should be
+    # wrapped with torch.compile. None preserves the legacy prefix policy based
+    # on ServerArgs.torch_compile_max_bs. This lets memory-constrained backends
+    # spend their compile budget on workload-relevant buckets without compiling
+    # every smaller graph first.
+    torch_compile_bs: Optional[List[int]] = None
     # Only meaningful for the prefill phase with backend == full: max number of
     # request slots baked into each captured graph. Real bs <= full_prefill_max_req
     # reuses the graph (unused slots become zero-length sentinels); larger

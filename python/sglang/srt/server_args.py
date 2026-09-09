@@ -2068,6 +2068,12 @@ class ServerArgs:
     torch_compile_max_bs: A[
         int, "Set the maximum batch size when using torch compile.", NS("exec.graph")
     ] = 32
+    torch_compile_bs: A[
+        Optional[List[int]],
+        "Explicit decode batch sizes to wrap with torch.compile. By default, "
+        "all captured sizes up to torch_compile_max_bs are compiled.",
+        NS("exec.graph"),
+    ] = None
     # -------------------------------------------------------------------------
     # Speculative decoding
     # -------------------------------------------------------------------------
@@ -4534,6 +4540,8 @@ class ServerArgs:
             # decode is implemented; today decode ignores it.
             _set(Phase.DECODE, "tc_compiler", self.cuda_graph_tc_compiler)
             _set(Phase.PREFILL, "tc_compiler", self.cuda_graph_tc_compiler)
+        if self.torch_compile_bs is not None:
+            _set(Phase.DECODE, "torch_compile_bs", self.torch_compile_bs)
 
         # ---- Explicit JSON config (highest precedence) ----
         for phase, phase_config in explicit_input.items():
