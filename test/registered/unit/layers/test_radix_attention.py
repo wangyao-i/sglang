@@ -265,6 +265,47 @@ class TestRadixAttentionGraphInterface(CustomTestCase):
         self.assertEqual(lse.shape, (4, 2))
         self.assertIs(forward_batch.out_cache_loc, original_out_cache_loc)
 
+    def test_decode_compile_dispatches_through_real_graph_break(self):
+        layer = self._new_layer()
+        forward_batch = SimpleNamespace(
+            forward_mode=ForwardMode.DECODE,
+            mha_return_lse=False,
+        )
+        context = SimpleNamespace(
+            mha_companion_layers=None,
+            use_decode_graph_attention=True,
+        )
+        query = torch.zeros((2, 2, 3))
+        backend_output = torch.full_like(query, 7)
+
+        with (
+            patch.object(
+                radix_attention_module,
+                "get_tc_piecewise_forward_context",
+                return_value=context,
+            ),
+            patch.object(
+                radix_attention_module,
+                "_npu_decode_attention_graph_break",
+                return_value=backend_output,
+            ) as graph_break,
+        ):
+            output = layer(query, query, query, forward_batch)
+
+        self.assertIs(output, backend_output)
+        graph_break.assert_called_once()
+        args = graph_break.call_args.args
+        self.assertIs(args[0], query)
+        self.assertEqual(args[1].shape, query.shape)
+        self.assertEqual(args[2].shape, query.shape)
+        self.assertIs(args[3], layer)
+        self.assertIs(args[4], forward_batch)
+        self.assertTrue(args[5])
+        self.assertEqual(
+            graph_break.call_args.kwargs,
+            {"q_rope": None, "k_rope": None, "sinks": None},
+        )
+
     def test_impl_preserves_output_only_contract(self):
         attention_layer = SimpleNamespace()
         context = self._new_impl_context([attention_layer])

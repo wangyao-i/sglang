@@ -186,7 +186,11 @@ def patch_model_npu(
                 )
             yield torch.compile(
                 torch.no_grad()(model.forward),
-                fullgraph=True,
+                # NPU paged attention owns dynamic ForwardBatch/KV-cache state
+                # that cannot be represented by tensor-only custom-op inputs.
+                # Keep that explicit graph break eager and compile the decoder
+                # segments around it.
+                fullgraph=False,
                 dynamic=False,
                 backend=backend,
             )

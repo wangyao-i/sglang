@@ -102,7 +102,7 @@ def test_npu_patch_model_uses_compile_safe_model_context():
 
     assert [event[0] for event in events] == ["enter", "exit"]
     assert compile_mock.call_args.kwargs == {
-        "fullgraph": True,
+        "fullgraph": False,
         "dynamic": False,
         "backend": "npugraph_ex",
     }
@@ -204,7 +204,7 @@ def test_npu_patch_model_dynamo_eager_diagnostic_uses_eager_backend(monkeypatch)
             assert forward is compiled
 
     assert compile_mock.call_args.kwargs == {
-        "fullgraph": True,
+        "fullgraph": False,
         "dynamic": False,
         "backend": "eager",
     }

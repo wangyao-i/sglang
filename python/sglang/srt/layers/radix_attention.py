@@ -255,6 +255,27 @@ class RadixAttention(nn.Module):
                 mha_companion_layers is not None
                 and mha_companion_layers[self.layer_id] is self
             )
+            if (
+                getattr(context, "use_decode_graph_attention", False)
+                and forward_batch.forward_mode.is_decode()
+                and key_value_num_tokens is None
+                and not return_lse
+            ):
+                attention_layer = self
+                if use_mha_companion:
+                    attention_layer = mha_companion_layers[self.layer_id]
+                    assert attention_layer is not None
+                return _npu_decode_attention_graph_break(
+                    q,
+                    k,
+                    v,
+                    attention_layer,
+                    forward_batch,
+                    save_kv_cache,
+                    q_rope=kwargs.get("q_rope"),
+                    k_rope=kwargs.get("k_rope"),
+                    sinks=kwargs.get("sinks"),
+                )
             if is_in_breakable_cuda_graph():
                 op = (
                     breakable_unified_attention_with_output_and_lse
@@ -291,6 +312,47 @@ class RadixAttention(nn.Module):
                 save_kv_cache,
                 **kwargs,
             )
+
+
+@torch.compiler.disable
+def _npu_decode_attention_graph_break(
+    query: torch.Tensor,
+    key: Optional[torch.Tensor],
+    value: Optional[torch.Tensor],
+    attention_layer: "RadixAttention",
+    forward_batch: ForwardBatch,
+    save_kv_cache: bool,
+    *,
+    q_rope: Optional[torch.Tensor] = None,
+    k_rope: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Execute stateful NPU decode attention outside the Dynamo graph.
+
+    The backend reads runner-owned ForwardBatch and KV-cache state in addition
+    to its tensor arguments.  Representing this call as a custom op hides
+    those dependencies from Dynamo and can reuse stale state.  A real graph
+    break preserves the backend's functional output and stateful contract while
+    allowing the surrounding decoder operations to remain compiled.
+    """
+    kwargs = {}
+    if q_rope is not None:
+        kwargs["q_rope"] = q_rope
+    if k_rope is not None:
+        kwargs["k_rope"] = k_rope
+    if sinks is not None:
+        kwargs["sinks"] = sinks
+    ret = get_attn_backend().forward_decode_graph(
+        query,
+        key,
+        value,
+        attention_layer,
+        forward_batch,
+        save_kv_cache,
+        **kwargs,
+    )
+    assert isinstance(ret, torch.Tensor)
+    return ret
 
 
 def _unified_attention_with_output_impl(
