@@ -1548,12 +1548,22 @@ class ModelRunner:
                 forward_batch,
             ) as recorder_outputs,
         ):
-            output = self._forward_raw(
-                forward_batch,
-                pp_proxy_tensors,
-                reinit_attn_backend,
-                split_forward_count,
+            phase = (
+                "decode"
+                if forward_batch.forward_mode.is_decode()
+                else "prefill"
+                if forward_batch.forward_mode.is_extend(
+                    include_draft_extend_v2=True
+                )
+                else forward_batch.forward_mode.name.lower()
             )
+            with self._external_model_execution_context(phase):
+                output = self._forward_raw(
+                    forward_batch,
+                    pp_proxy_tensors,
+                    reinit_attn_backend,
+                    split_forward_count,
+                )
             if (
                 envs.SGLANG_LOG_DECODE_GRAPH_KEY.get()
                 and forward_batch.forward_mode.is_decode()
@@ -1817,6 +1827,29 @@ class ModelRunner:
         if context is None:
             raise RuntimeError(
                 "external graph execution context factory returned None for "
+                f"phase={phase}"
+            )
+        return context
+
+    def _external_model_execution_context(self, phase: str):
+        """Return an optional integrator-owned model-execution context.
+
+        Unlike the graph-only hook, this context covers the complete raw model
+        execution region, including graph eligibility, device-input
+        preparation, graph replay, and eager/compiled fallback.  It excludes
+        scheduler work and post-forward bookkeeping.  Colocated multimodal
+        runtimes use this boundary when another host thread can submit device
+        work concurrently with every one of those paths.
+        """
+        factory = getattr(
+            self, "_external_model_execution_context_factory", None
+        )
+        if factory is None:
+            return contextlib.nullcontext()
+        context = factory(phase)
+        if context is None:
+            raise RuntimeError(
+                "external model execution context factory returned None for "
                 f"phase={phase}"
             )
         return context
