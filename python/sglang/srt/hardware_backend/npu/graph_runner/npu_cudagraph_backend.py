@@ -13,6 +13,7 @@ non-NPU hosts.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from contextlib import AbstractContextManager, contextmanager
 from functools import partial
@@ -20,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
-
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
@@ -40,6 +40,28 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+_INPUT_UPDATE_MODE_ENV = "SGLANG_NPU_GRAPH_INPUT_UPDATE_MODE"
+_INPUT_UPDATE_MODES = frozenset(("threaded", "ordered"))
+
+
+def _get_input_update_mode() -> str:
+    """Return the NPU graph input-update scheduling mode.
+
+    ``threaded`` preserves the historical overlap between ``graph.update`` and
+    ``graph.replay``. ``ordered`` performs both calls on the model execution
+    thread, in that order, so a caller-held device execution guard covers the
+    complete update/replay transaction without waiting for an unguarded helper
+    thread.
+    """
+    mode = os.getenv(_INPUT_UPDATE_MODE_ENV, "threaded").strip().lower()
+    if mode not in _INPUT_UPDATE_MODES:
+        supported = ", ".join(sorted(_INPUT_UPDATE_MODES))
+        raise ValueError(
+            f"Unsupported {_INPUT_UPDATE_MODE_ENV}={mode!r}; expected one of: "
+            f"{supported}"
+        )
+    return mode
 
 
 class NPUCudaGraphBackend(BaseCudaGraphBackend):
@@ -66,6 +88,12 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         )
         self._enable_torch_compile = getattr(
             cuda_graph_runner, "enable_torch_compile", False
+        )
+        self._input_update_mode = _get_input_update_mode()
+        logger.info(
+            "NPU graph input update mode: %s=%s",
+            _INPUT_UPDATE_MODE_ENV,
+            self._input_update_mode,
         )
 
     @contextmanager
@@ -154,8 +182,13 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         attr_type: Any = None,
         cpu_update_input: list = None,
     ) -> Any:
-        """Rebind seq_lens on the recorded NPU graph in a background
-        thread, then replay. Used when the model is not deepseek-nsa.
+        """Rebind seq_lens on the recorded NPU graph, then replay.
+
+        The default ``threaded`` mode preserves the historical background
+        update/replay overlap. The opt-in ``ordered`` mode executes update then
+        replay on the model execution thread, avoiding a helper-thread join
+        while an external device execution guard is held. Used when the model
+        is not deepseek-nsa.
 
         Two calling conventions:
         1. (legacy) seq_lens + attr_name + attr_type:
@@ -180,6 +213,35 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
             )
 
         graph = self._graphs[shape_key]
+
+        if self._input_update_mode == "ordered":
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph backend: stage=ordered_update_begin "
+                    "key_size=%s",
+                    shape_key.size,
+                )
+            self._device_module.set_device(self._device_id)
+            graph.update(cpu_update_input=cpu_update_input)
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph backend: stage=ordered_update_return "
+                    "key_size=%s",
+                    shape_key.size,
+                )
+                logger.info(
+                    "NPU decode graph backend: stage=ordered_replay_begin "
+                    "key_size=%s",
+                    shape_key.size,
+                )
+            graph.replay()
+            if log_graph_key:
+                logger.info(
+                    "NPU decode graph backend: stage=ordered_replay_return "
+                    "key_size=%s",
+                    shape_key.size,
+                )
+            return self._outputs[shape_key]
 
         def _update():
             if log_graph_key:
