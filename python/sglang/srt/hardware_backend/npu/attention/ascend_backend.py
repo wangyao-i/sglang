@@ -440,14 +440,14 @@ class AscendAttnBackend(AttentionBackend):
             raise RuntimeError("NPU decode attention metadata is not initialized")
         state = (
             forward_batch.out_cache_loc,
-            metadata.seq_lens_cpu_int,
+            forward_batch.seq_lens,
             metadata.block_tables,
             self.token_to_kv_pool.get_key_buffer(layer.layer_id),
             self.token_to_kv_pool.get_value_buffer(layer.layer_id),
         )
         names = (
             "out_cache_loc",
-            "seq_lens_cpu_int",
+            "seq_lens",
             "block_tables",
             "key_cache",
             "value_cache",

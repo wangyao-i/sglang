@@ -161,6 +161,61 @@ class TestForwardMetadata(unittest.TestCase):
         self.assertEqual(names, expected)
 
 
+class TestDecodeGraphCompileState(unittest.TestCase):
+    def test_uses_required_forward_batch_seq_lens_in_graph_mode(self):
+        backend = AscendAttnBackend.__new__(AscendAttnBackend)
+        backend.use_mla = False
+        backend.is_hybrid_swa = False
+        block_tables = torch.zeros((2, 4), dtype=torch.int32)
+        backend.forward_metadata = ForwardMetadata(
+            block_tables=block_tables,
+            seq_lens=torch.tensor([8, 9], dtype=torch.int32),
+            seq_lens_cpu_int=None,
+            seq_lens_cpu_list=[8, 9],
+        )
+        key_cache = torch.zeros((4, 2, 3))
+        value_cache = torch.zeros((4, 2, 3))
+        backend.token_to_kv_pool = SimpleNamespace(
+            get_key_buffer=lambda _layer_id: key_cache,
+            get_value_buffer=lambda _layer_id: value_cache,
+        )
+        out_cache_loc = torch.arange(2)
+        seq_lens = torch.tensor([10, 11], dtype=torch.int32)
+        forward_batch = SimpleNamespace(
+            out_cache_loc=out_cache_loc,
+            seq_lens=seq_lens,
+        )
+        layer = SimpleNamespace(layer_id=3, sliding_window_size=None)
+
+        state = backend.get_decode_graph_compile_state(layer, forward_batch)
+
+        self.assertIs(state[0], out_cache_loc)
+        self.assertIs(state[1], seq_lens)
+        self.assertIs(state[2], block_tables)
+        self.assertIs(state[3], key_cache)
+        self.assertIs(state[4], value_cache)
+
+    def test_rejects_missing_required_forward_batch_seq_lens(self):
+        backend = AscendAttnBackend.__new__(AscendAttnBackend)
+        backend.use_mla = False
+        backend.is_hybrid_swa = False
+        backend.forward_metadata = ForwardMetadata(
+            block_tables=torch.zeros((1, 1), dtype=torch.int32)
+        )
+        backend.token_to_kv_pool = SimpleNamespace(
+            get_key_buffer=lambda _layer_id: torch.zeros(1),
+            get_value_buffer=lambda _layer_id: torch.zeros(1),
+        )
+        forward_batch = SimpleNamespace(
+            out_cache_loc=torch.zeros(1, dtype=torch.int64),
+            seq_lens=None,
+        )
+        layer = SimpleNamespace(layer_id=0, sliding_window_size=None)
+
+        with self.assertRaisesRegex(RuntimeError, "requires tensor seq_lens"):
+            backend.get_decode_graph_compile_state(layer, forward_batch)
+
+
 class TestGenerateMaskFlag(unittest.TestCase):
     def test_shape(self):
         mask = AscendAttnMaskBuilder.generate_mask_flag(8)
