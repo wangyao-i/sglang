@@ -1722,11 +1722,10 @@ class ModelRunner:
                         forward_batch.forward_mode.name,
                         forward_batch.batch_size,
                     )
-                with self._external_graph_execution_context("decode"):
-                    ret = self.decode_cuda_graph_runner.execute(
-                        forward_batch,
-                        pp_proxy_tensors=pp_proxy_tensors,
-                    )
+                ret = self.decode_cuda_graph_runner.execute(
+                    forward_batch,
+                    pp_proxy_tensors=pp_proxy_tensors,
+                )
                 if log_decode_graph:
                     logger.info(
                         "Decode graph dispatch: stage=execute_return mode=%s raw_bs=%d",
@@ -1779,10 +1778,9 @@ class ModelRunner:
                 # load_batch time. Move it into the prefill cuda graph runner
                 # to capture only the model.forward part.
                 with device_timer_ctx(self.device_timer, category):
-                    with self._external_graph_execution_context("prefill"):
-                        ret = self.prefill_cuda_graph_runner.execute(
-                            forward_batch, **kwargs
-                        )
+                    ret = self.prefill_cuda_graph_runner.execute(
+                        forward_batch, **kwargs
+                    )
                 can_run_graph = True
             else:
                 # Eager: decode / extend / idle dispatched inside the runner.
@@ -1797,29 +1795,6 @@ class ModelRunner:
                 forward_batch.post_forward_mlp_sync_batch(ret)
 
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
-
-    def _external_graph_execution_context(self, phase: str):
-        """Return an optional integrator-owned graph-dispatch context.
-
-        Colocated multimodal runtimes can attach a process-local context
-        factory after ModelRunner construction to coordinate device work from
-        another host thread. Keeping the hook exactly around graph execute
-        avoids serializing scheduling, input preparation, logits processing,
-        and sampling. Ordinary SGLang serving has no factory and retains the
-        existing behavior.
-        """
-        factory = getattr(
-            self, "_external_graph_execution_context_factory", None
-        )
-        if factory is None:
-            return contextlib.nullcontext()
-        context = factory(phase)
-        if context is None:
-            raise RuntimeError(
-                "external graph execution context factory returned None for "
-                f"phase={phase}"
-            )
-        return context
 
     def _preprocess_logits(
         self, logits_output: LogitsProcessorOutput, sampling_info: SamplingBatchInfo
