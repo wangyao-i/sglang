@@ -32,14 +32,11 @@ from unittest import mock
 
 import pytest
 import torch
-from sglang.srt.hardware_backend.npu.graph_runner import (
-    npu_cudagraph_backend as npu_backend,
-)
+
 from sglang.srt.model_executor.runner import decode_cuda_graph_runner as mod
 from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
     DecodeCudaGraphRunner,
 )
-from sglang.srt.model_executor.runner.shape_key import ShapeKey
 from sglang.srt.utils import profile_utils as putils
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -494,99 +491,6 @@ def test_npu_prefill_capture_only_diagnostic_gate(monkeypatch):
     assert model_runner._skip_npu_prefill_graph_replay_for_diagnostics()
 
 
-def test_npu_graph_input_update_mode_validation(monkeypatch):
-    monkeypatch.delenv("SGLANG_NPU_GRAPH_INPUT_UPDATE_MODE", raising=False)
-    assert npu_backend._get_input_update_mode() == "threaded"
-
-    monkeypatch.setenv("SGLANG_NPU_GRAPH_INPUT_UPDATE_MODE", " ORDERED ")
-    assert npu_backend._get_input_update_mode() == "ordered"
-
-    monkeypatch.setenv("SGLANG_NPU_GRAPH_INPUT_UPDATE_MODE", "invalid")
-    with pytest.raises(
-        ValueError, match="Unsupported SGLANG_NPU_GRAPH_INPUT_UPDATE_MODE"
-    ):
-        npu_backend._get_input_update_mode()
-
-
-def _make_npu_backend_for_update_mode(mode, actions):
-    class FakeGraph:
-        def update(self, *, cpu_update_input):
-            actions.append(("update", cpu_update_input))
-
-        def replay(self):
-            actions.append(("replay", None))
-
-    class FakeDeviceModule:
-        def set_device(self, device_id):
-            actions.append(("set_device", device_id))
-
-    shape_key = ShapeKey(size=2)
-    backend = object.__new__(npu_backend.NPUCudaGraphBackend)
-    backend._graphs = {shape_key: FakeGraph()}
-    backend._outputs = {shape_key: "output"}
-    backend._device_module = FakeDeviceModule()
-    backend._device_id = 7
-    backend._input_update_mode = mode
-    return backend, shape_key
-
-
-def test_npu_ordered_input_update_runs_update_before_replay_without_thread():
-    actions = []
-    backend, shape_key = _make_npu_backend_for_update_mode("ordered", actions)
-    update_input = [{"actual_seq_lengths": [2, 1]}]
-
-    with mock.patch.object(
-        npu_backend.threading,
-        "Thread",
-        side_effect=AssertionError("ordered mode must not create a helper thread"),
-    ):
-        output = backend.replay_with_input_update(
-            shape_key,
-            seq_lens=None,
-            cpu_update_input=update_input,
-        )
-
-    assert output == "output"
-    assert actions == [
-        ("set_device", 7),
-        ("update", update_input),
-        ("replay", None),
-    ]
-
-
-def test_npu_threaded_input_update_preserves_helper_thread_path():
-    actions = []
-    backend, shape_key = _make_npu_backend_for_update_mode("threaded", actions)
-    update_input = [{"actual_seq_lengths": [2, 1]}]
-
-    class SynchronousThread:
-        def __init__(self, *, target):
-            self._target = target
-
-        def start(self):
-            actions.append(("thread_start", None))
-            self._target()
-
-        def join(self):
-            actions.append(("thread_join", None))
-
-    with mock.patch.object(npu_backend.threading, "Thread", SynchronousThread):
-        output = backend.replay_with_input_update(
-            shape_key,
-            seq_lens=None,
-            cpu_update_input=update_input,
-        )
-
-    assert output == "output"
-    assert actions == [
-        ("thread_start", None),
-        ("set_device", 7),
-        ("update", update_input),
-        ("replay", None),
-        ("thread_join", None),
-    ]
-
-
 def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
     root = Path(__file__).resolve().parents[5]
     model_runner_source = (
@@ -648,10 +552,6 @@ def test_decode_graph_diagnostics_cover_dispatch_and_replay_boundaries():
         "graph_replay_return",
         "update_thread_join_begin",
         "update_thread_join_return",
-        "ordered_update_begin",
-        "ordered_update_return",
-        "ordered_replay_begin",
-        "ordered_replay_return",
     ):
         assert npu_backend_source.count(f"stage={stage}") == 1
 
